@@ -1,0 +1,72 @@
+# ==============================================================================
+# Byte-compiled / optimized / DLL files
+# ==============================================================================
+__pycache__/
+*.py[cod]
+*$py.class
+*.pyd
+*.pyo
+
+# ==============================================================================
+# PyInstaller Intermediate Builds & Archives
+# (Note: dist/ is intentionally NOT ignored so the standalone .exe is tracked)
+# ==============================================================================
+build/
+*.spec.bak
+_archive/
+*.zip
+*.tar.gz
+*.rar
+
+# ==============================================================================
+# Environments & Secrets
+# ==============================================================================
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.cert
+*.crt
+credentials.json
+secrets.json
+
+# Virtual Environments
+venv/
+.venv/
+env/
+ENV/
+env.bak/
+venv.bak/
+
+# ==============================================================================
+# Application Logs & Runtime Outputs
+# ==============================================================================
+logs/*.csv
+logs/*.json
+!logs/.gitkeep
+*.log
+.tmp/
+temp/
+tmp/
+
+# ==============================================================================
+# IDE & Editor Configurations
+# ==============================================================================
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.cursor/
+
+# ==============================================================================
+# Operating System Files
+# ==============================================================================
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+$RECYCLE.BIN/
+.DS_Store
+.Spotlight-V100
+.Trashes
