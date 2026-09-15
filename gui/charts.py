@@ -27,7 +27,7 @@ class History:
         n = self.N
         self.cols = {k: np.full(n, np.nan) for k in
                      ("t", "err", "point", "snr", "conf", "vision", "control", "render",
-                      "render_ms", "detect_ms", "track_ms", "dx", "dy", "state")}
+                      "render_ms", "detect_ms", "track_ms", "dx", "dy", "state", "idp")}
         self.i = 0
         self.last_frame = -1
 
@@ -51,6 +51,7 @@ class History:
         C["render"][k] = s.rates["render"] or np.nan
         C["render_ms"][k], C["detect_ms"][k], C["track_ms"][k] = s.stage_ms
         C["state"][k] = STATE_IDX.get(o.state, 0)
+        C["idp"][k] = o.lock_p * 100.0 if (o.lock_p > 0 and o.state in ("LOCKED", "COASTING")) else np.nan
         if o.measurement and s.truth.target_px and o.state == "LOCKED":
             C["dx"][k] = o.measurement[0] - s.truth.target_px[0]
             C["dy"][k] = o.measurement[1] - s.truth.target_px[1]

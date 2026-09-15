@@ -1,6 +1,6 @@
 """Engine — runs the closed loop with decoupled threads.
 
-  Vision thread  (30 Hz)  capture/render frame -> detect -> track -> evaluate -> publish
+  Vision thread  (30 Hz)  capture/render frame -> detect -> identify -> track -> evaluate -> publish
   Control thread (60 Hz)  read encoders -> Kalman prediction to 'now + latency' ->
                           PI + feed-forward -> gimbal rate command
   GUI thread     (60 Hz)  reads immutable snapshots; never blocks the loops
@@ -13,20 +13,24 @@ import math
 import threading
 import time
 from collections import deque
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Callable, Dict, List, Optional, Tuple
 
 import numpy as np
 
 from ..core.controller import GimbalController
 from ..core.geometry import CameraIntrinsics
-from ..core.pipeline import PipelineOutput, TrackingPipeline, TrackState
+from ..core.pipeline import PipelineOutput, TrackingPipeline
 from ..io.gimbal import SimulatedGimbal
-from ..sim.hazards import HAZARD_KEYS
+from ..sim.patterns import INFO_BY_KEY
 from ..sim.renderer import SensorRenderer, Truth
+from ..sim.terminals import PLATFORM_BY_KEY
 from ..sim.world import SimWorld
 from .evaluator import Evaluator
 from .recorder import Recorder
+
+DEFAULT_PATTERN = {"quad": "hover", "fixedwing": "orbit", "ship": "maritime",
+                   "satellite": "leo_pass", "station": "iss_pass"}
 
 
 class RateMeter:
@@ -92,12 +96,15 @@ class Snapshot:
     hazard_levels: Dict[str, float]
     pattern: str
     time_of_day: str
-    search: Tuple[float, float, float, float, float]   # center az, el, pitch, rmax, s
+    search: Tuple[float, float, float, float, float]
     centroid_err: Optional[float]
     pointing_err: Optional[float]
     track_sep_px: Optional[float]
     paused: bool
     run_id: int
+    cam_pos: Tuple[float, float, float]
+    platform: str
+    domain: str
 
 
 class Engine:
@@ -129,7 +136,9 @@ class Engine:
         self._threads: List[threading.Thread] = []
         self._last_control_t: Optional[float] = None
         self.run_id = 0
+        self.ui_revision = 0          # bumped when the engine changes settings the UI shows
         self.frame_listeners: List[Callable[[Snapshot], None]] = []
+        self.gimbal.reset(*self._park_pose(0.0))
 
     # ================================================================ lifecycle
     def start(self) -> None:
@@ -158,17 +167,26 @@ class Engine:
         for fn in cmds:
             fn()
 
+    def _park_pose(self, t: float) -> Tuple[float, float]:
+        """Cold-start pointing. Spacecraft: open-loop pre-point to the ephemeris-predicted
+        position (as operational ground stations do before a pass). Otherwise: stow at 0/0."""
+        if self.world.remote.space:
+            c = self.world.cue(t)
+            return c.az, c.el
+        return 0.0, 0.0
+
+    def _restart_tracking(self, t: float, park: bool = False) -> None:
+        if park:
+            self.gimbal.reset(*self._park_pose(t))
+        self.controller.reset()
+        self.pipeline.reset()
+        self.evaluator.reset(t)
+        self.recorder.clear()
+        self._last_control_t = None
+        self.run_id += 1
+
     def cold_restart(self) -> None:
-        def do():
-            t = self.clock.now()
-            self.gimbal.reset(0.0, 0.0)
-            self.controller.reset()
-            self.pipeline.reset()
-            self.evaluator.reset(t)
-            self.recorder.clear()
-            self._last_control_t = None
-            self.run_id += 1
-        self._post(do)
+        self._post(lambda: self._restart_tracking(self.clock.now(), park=True))
 
     def new_run(self, seed: Optional[int] = None) -> None:
         def do():
@@ -180,13 +198,7 @@ class Engine:
             self.clock.reset()
             if was_paused:
                 self.clock.pause()
-            self.gimbal.reset(0.0, 0.0)
-            self.controller.reset()
-            self.pipeline.reset()
-            self.evaluator.reset(0.0)
-            self.recorder.clear()
-            self._last_control_t = None
-            self.run_id += 1
+            self._restart_tracking(0.0, park=True)
         self._post(do)
 
     def set_paused(self, paused: bool) -> None:
@@ -199,9 +211,85 @@ class Engine:
     def paused(self) -> bool:
         return self.clock.paused
 
+    # ------------------------------------------------------------ remote terminal
     def set_pattern(self, key: str) -> None:
-        self._post(lambda: self.world.patterns.set_pattern(key, self.clock.now()))
+        def do():
+            t = self.clock.now()
+            w = self.world
+            was_space = w.remote.space
+            w.remote.set_pattern(key, t)
+            now_space = w.remote.space
+            if was_space != now_space:
+                w.time_of_day = "night" if now_space else "day"
+                self.ui_revision += 1
+            if was_space or now_space:
+                # a different sky: acquisition starts afresh from the new ephemeris
+                self._restart_tracking(t, park=True)
+        self._post(do)
 
+    def set_platform(self, platform: str) -> None:
+        self.set_pattern(DEFAULT_PATTERN[platform])
+
+    def set_remote(self, speed: Optional[float] = None, range_km: Optional[float] = None,
+                   bearing: Optional[float] = None, altitude: Optional[float] = None,
+                   variation: Optional[float] = None) -> None:
+        def do():
+            t, r = self.clock.now(), self.world.remote
+            if speed is not None:
+                r.set_speed(t, speed)
+            if range_km is not None:
+                r.range_km.set(t, range_km)
+            if bearing is not None:
+                r.bearing.set(t, bearing)
+            if altitude is not None:
+                r.alt_off.set(t, altitude)
+            if variation is not None:
+                r.variation.set(t, variation)
+        self._post(do)
+
+    def set_orbit(self, alt_km: Optional[float] = None, max_el: Optional[float] = None,
+                  heading: Optional[float] = None) -> None:
+        def do():
+            t = self.clock.now()
+            self.world.remote.set_orbit(t, alt_km, max_el, heading)
+            if self.world.remote.key in ("leo_pass", "iss_pass"):
+                self._restart_tracking(t, park=True)
+        self._post(do)
+
+    def remote_goto(self, x: float, z: float, y: Optional[float] = None) -> None:
+        def do():
+            r = self.world.remote
+            before = r.key
+            r.goto(self.clock.now(), x, z, y)
+            if r.key != before:
+                self.ui_revision += 1
+        self._post(do)
+
+    # ------------------------------------------------------------ ground terminal
+    def set_ground(self, mount: Optional[str] = None, x: Optional[float] = None, z: Optional[float] = None,
+                   height: Optional[float] = None) -> None:
+        def do():
+            t, g = self.clock.now(), self.world.ground
+            if mount is not None:
+                g.set_mount(t, mount)
+            g.set_position(t, x, z, height)
+        self._post(do)
+
+    # ------------------------------------------------------------------ beacon
+    def set_beacon(self, freq_hz: Optional[float] = None, brightness: Optional[float] = None,
+                   depth: Optional[float] = None) -> None:
+        b = self.world.beacon
+        if freq_hz is not None:
+            b.freq_hz = float(freq_hz)
+        if brightness is not None:
+            b.brightness = float(brightness)
+        if depth is not None:
+            b.depth = float(depth)
+
+    def reset_identity(self) -> None:
+        self._post(self.pipeline.reset_identity)
+
+    # ------------------------------------------------------------------ misc
     def set_hazard(self, key: str, enabled: Optional[bool] = None, intensity: Optional[float] = None) -> None:
         self.world.hazards.set(key, enabled, intensity)
 
@@ -216,6 +304,15 @@ class Engine:
 
     def report_render_frame(self) -> None:
         self.render_rate.tick()
+
+    def remote_state(self) -> dict:
+        r, g, b = self.world.remote, self.world.ground, self.world.beacon
+        return dict(platform=r.info.platform, pattern=r.key, speed=r.warp._seg[-1][3], range_km=r.range_km.target(),
+                    bearing=r.bearing.target(), altitude=r.alt_off.target(), variation=r.variation.target(),
+                    orbit_alt=r.orbit_alt, max_el=r.max_el, heading=r.heading, mount=g.mount,
+                    ground_x=g.x.target(), ground_z=g.z.target(), ground_h=g.height.target(),
+                    beacon_freq=b.freq_hz, beacon_brightness=b.brightness, beacon_depth=b.depth,
+                    max_slew=math.degrees(self.controller.max_rate), time_of_day=self.world.time_of_day)
 
     # ================================================================ loops
     def _control_loop(self) -> None:
@@ -289,15 +386,17 @@ class Engine:
         b, rmax, s = self.pipeline.search_geometry()
         caz, cel, _, _ = self.pipeline.search_center(t)
         ev = self.evaluator
+        w = self.world
         snap = Snapshot(
             t=t, image=image, out=out, truth=truth, gimbal=g,
             cue=(cue.az, cue.el) if cue else (0.0, 0.0),
-            target_pos=self.world.target_pos(t), range_m=truth.range_m,
+            target_pos=w.target_pos(t), range_m=truth.range_m,
             metrics=metrics, rates=rates, stage_ms=stage,
-            hazard_levels=self.world.hazards.levels(), pattern=self.world.patterns.key,
-            time_of_day=self.world.time_of_day, search=(caz, cel, b, rmax, s),
+            hazard_levels=w.hazards.levels(), pattern=w.remote.key,
+            time_of_day=w.time_of_day, search=(caz, cel, b, rmax, s),
             centroid_err=ev.last_centroid_err, pointing_err=ev.last_pointing_err,
             track_sep_px=ev.last_track_sep_px, paused=self.clock.paused, run_id=self.run_id,
+            cam_pos=w.camera_pos(t), platform=w.remote.info.platform, domain=w.domain,
         )
         self._snapshot = snap
         for fn in self.frame_listeners:
@@ -312,15 +411,14 @@ class Engine:
         return self._snapshot
 
     def live_pose(self):
-        """Smooth 60 Hz pose for the world view: (t, target_pos, gimbal az, el)."""
+        """Smooth 60 Hz pose for the world view: (t, target_pos, gimbal az, el, camera_pos)."""
         t = self.clock.now()
         g = self.gimbal.true_pose(t)
-        return t, self.world.target_pos(t), g[0], g[1]
+        return t, self.world.target_pos(t), g[0], g[1], self.world.camera_pos(t)
 
     # ================================================================ headless
     def run_headless(self, duration_s: float, events: Dict[float, Callable[["Engine"], None]] = None,
                      on_frame: Optional[Callable[[Snapshot], None]] = None) -> dict:
-        """Deterministic stepped run at simulated real-time rates (used by validation)."""
         self.headless = True
         self._run_commands()
         events = dict(events or {})
@@ -342,4 +440,7 @@ class Engine:
         m = self.evaluator.metrics(rates["vision"], rates["control"], None)
         summary = self.evaluator.summary()
         summary["wall_time_s"] = round(wall, 2)
+        sig = self.pipeline.identifier.sig
+        summary["identity_learned"] = sig.learned
+        summary["identity_freq_hz"] = round(sig.freq_hz, 2)
         return {"metrics": m, "summary": summary}

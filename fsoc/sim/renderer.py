@@ -1,10 +1,11 @@
 """NIR (850 nm) sensor renderer — produces the same Frame a real camera would.
 
 Image formation, in physical order:
-  background radiance (sky gradient, drifting clouds, terrain with aerial perspective)
+  background radiance (sky gradient, drifting clouds, terrain / sea with aerial perspective)
   -> fog/rain transmission and path-radiance veil
-  -> point sources: beacon (1/R^2, transmission, scintillation, beam wander, motion blur,
-     forward-scatter halo), decoy lights, sun disk
+  -> point sources: beacon (modulated, 1/R^2, transmission, scintillation, beam wander,
+     motion blur, forward-scatter halo) and any sun-lit spacecraft body; decoy lights;
+     for space targets a rotating star field, other satellites and a planet; sun disk
   -> occluders, rain streaks, lens droplets, blur (turbulence / scattering)
   -> veiling glare and ghosts -> vignetting
   -> sensor: shot noise, read noise, row banding, hot pixels, quantisation, saturation.
@@ -13,17 +14,18 @@ Ground truth for scoring is returned separately and never enters the pipeline.
 
 import math
 from dataclasses import dataclass
-from typing import List, Optional, Tuple
+from typing import Optional, Tuple
 
 import cv2
 import numpy as np
 
-from ..core.geometry import CameraIntrinsics, direction_to_pixel
+from ..core.geometry import CameraIntrinsics, direction_to_pixel, los_to_direction
 from ..io.frame import Frame
-from .world import CAMERA_POS, SimWorld
+from .world import SimWorld
 
 DEG = math.pi / 180.0
 RAD2DEG = 180.0 / math.pi
+E_REF = 1400.0 * 2 * math.pi * 1.3 ** 2        # reference point source: 1400 DN peak
 
 AMBIENT = {
     #          zenith, horizon, clouds, ground, ground_tex, exposure_s
@@ -45,6 +47,7 @@ class Truth:
     cam_az: float
     cam_el: float
     beacon_peak_dn: float
+    beacon_on: bool = True
 
 
 def _fractal_noise(h: int, w: int, rng: np.random.Generator, octaves=5, base=6) -> np.ndarray:
@@ -62,8 +65,14 @@ def _fractal_noise(h: int, w: int, rng: np.random.Generator, octaves=5, base=6) 
     return out
 
 
+def _unit(p, c):
+    dx, dy, dz = p[0] - c[0], p[1] - c[1], p[2] - c[2]
+    n = math.sqrt(dx * dx + dy * dy + dz * dz) or 1.0
+    return dx / n, dy / n, dz / n
+
+
 class SensorRenderer:
-    CLOUD_PPD = 12.0         # texels per degree
+    CLOUD_PPD = 12.0
     CLOUD_EL_TOP = 40.0
     GROUND_PPD = 6.0
     GROUND_EL_TOP = 2.0
@@ -81,6 +90,7 @@ class SensorRenderer:
         yy, xx = np.mgrid[0:H, 0:W].astype(np.float32)
         r2 = ((xx - K.cx) / K.cx) ** 2 + ((yy - K.cy) / K.cy) ** 2
         self._vignette = (1.0 - 0.14 * r2).astype(np.float32)
+        self._fov_radius_deg = 0.5 * math.hypot(K.hfov_deg, K.vfov_deg) + 0.3
         self.build_textures(seed)
 
     def build_textures(self, seed: int) -> None:
@@ -94,7 +104,6 @@ class SensorRenderer:
         g = _fractal_noise(gh, gw, rng, octaves=6, base=40)
         self._ground = (g - 0.5).astype(np.float32)
         n = 18000
-        az = np.linspace(-180, 180, n, endpoint=False)
         hills = _fractal_noise(1, n, rng, octaves=7, base=60)[0]
         self._hz_step = 360.0 / n
         self._horizon = (0.15 + 1.05 * hills ** 1.6).astype(np.float32) * DEG
@@ -113,18 +122,20 @@ class SensorRenderer:
         K, world, hz = self.K, self.world, self.world.hazards
         H, W = K.height, K.width
         hz.advance(t)
-        amb = AMBIENT[world.time_of_day]
+        tod = world.time_of_day
+        amb = AMBIENT[tod]
         exposure = amb[5]
+        cam = world.camera_pos(t)
 
         g_az, g_el, g_raz, g_rel = self.gimbal.true_pose(t)
         v_daz, v_del, v_raz, v_rel = hz.vibration(t)
-        cam_az, cam_el = g_az + v_daz, g_el + v_del
+        j_az, j_el = world.ground.residual_jitter(t)
+        cam_az, cam_el = g_az + v_daz + j_az, g_el + v_del + j_el
         enc = self.gimbal.read_state(t)
 
-        maritime = world.patterns.key == "maritime"
-        img = self._background(cam_az, cam_el, t, amb, maritime)
+        sea = world.remote.info.platform == "ship"
+        img = self._background(cam_az, cam_el, t, amb, sea)
 
-        # ---- atmosphere on background
         beta = hz.fog_beta_per_km()
         beta_rain = hz.rain_beta_per_km()
         if beta > 0:
@@ -136,73 +147,80 @@ class SensorRenderer:
             img *= 1.0 - 0.18 * hz.level("rain")
             img += 6.0 * hz.level("rain") * (amb[1] / 80.0)
 
-        # ---- beacon
+        aoa_x, aoa_y, scint, turb_blur = hz.turbulence()
+        psf = math.hypot(1.3, turb_blur)
+        space = world.remote.space
+        # the atmosphere only extends ~10 km for extinction purposes
+        atm_km_target = lambda r_km: min(r_km, 8.0) if space else r_km
+
+        # ---- sky clutter for space targets (stars, satellites, planet)
+        if space and tod != "day":
+            self._stars(img, t, cam_az, cam_el, psf, exposure, beta + beta_rain, hz.level("turbulence"), tod)
+            for oaz, oel, rel in world.space_objects(t, cam_az, cam_el):
+                p = direction_to_pixel(los_to_direction(oaz, oel), cam_az, cam_el, K)
+                if p is not None and -20 < p[0] < W + 20 and -20 < p[1] < H + 20:
+                    self._splat(img, p[0], p[1], E_REF * 3.0 * 0.35 * rel * math.exp(-(beta + beta_rain) * 8.0),
+                                psf, (0, 0), 0)
+
+        # ---- beacon (+ sun-lit spacecraft body at the same place)
         rng_m = world.target_range(t)
         tpos = world.target_pos(t)
-        tdir = self._unit(tpos)
+        tdir = _unit(tpos, cam)
         occ, occ_kind, occ_phase = hz.occlusion(t)
-        aoa_x, aoa_y, scint, turb_blur = hz.turbulence()
         truth_px = direction_to_pixel(tdir, cam_az, cam_el, K)
-
         r_km = rng_m / 1000.0
-        trans = math.exp(-(beta + beta_rain) * r_km)
-        energy = 1400.0 * 2 * math.pi * 1.3 ** 2 * world.beacon_power() / max(r_km, 0.3) ** 2 * 4.0
-        energy *= trans * scint * (1.0 - occ)
+        trans = math.exp(-(beta + beta_rain) * atm_km_target(r_km))
+        on = world.beacon.modulation(t) > 0.5
+        energy = E_REF * world.beacon_scale(t, rng_m) * trans * scint * (1.0 - occ)
+        body = E_REF * world.body_glint(t, rng_m) * trans * (1.0 - occ)
         peak_dn = 0.0
         if truth_px is not None:
             u, v = truth_px[0] + aoa_x, truth_px[1] + aoa_y
-            vel_px = self._image_velocity(t, tpos, cam_az, cam_el, g_raz + v_raz, g_rel + v_rel)
-            sigma = math.hypot(1.3, turb_blur)
-            peak_dn = self._splat(img, u, v, energy, sigma, vel_px, exposure)
+            vel_px = self._image_velocity(t, tpos, cam, cam_az, cam_el, g_raz + v_raz, g_rel + v_rel)
+            peak_dn = self._splat(img, u, v, energy + body, psf, vel_px, exposure)
             if beta > 0:
-                self._splat(img, u, v, energy / max(trans, 1e-3) * (1 - trans) * 0.10 * (1 - occ),
+                self._splat(img, u, v, (energy + body) / max(trans, 1e-3) * (1 - trans) * 0.10,
                             10 + 30 * hz.level("fog"), (0, 0), 0)
-            self._splat(img, u, v, energy * 0.02, 6.0, (0, 0), 0)
+            self._splat(img, u, v, (energy + body) * 0.02, 6.0, (0, 0), 0)
             if occ > 0.01:
                 self._draw_occluder(img, u, v, occ, occ_kind, occ_phase, amb)
 
-        # ---- decoys
+        # ---- ground / sea decoys
         for pos, inten in world.decoys(t):
-            d = self._unit(pos)
+            d = _unit(pos, cam)
             p = direction_to_pixel(d, cam_az, cam_el, K)
             if p is None or not (-40 < p[0] < W + 40 and -40 < p[1] < H + 40):
                 continue
-            rk = math.dist(pos, CAMERA_POS) / 1000.0
-            e = 1400.0 * 2 * math.pi * 1.3 ** 2 * 4.0 * inten / max(rk, 0.3) ** 2
-            e *= math.exp(-(beta + beta_rain) * rk)
-            self._splat(img, p[0], p[1], e, math.hypot(1.3, turb_blur), (0, 0), 0)
+            rk = math.dist(pos, cam) / 1000.0
+            e = E_REF * 4.0 * inten / max(rk, 0.3) ** 2 * math.exp(-(beta + beta_rain) * rk)
+            self._splat(img, p[0], p[1], e, psf, (0, 0), 0)
 
-        # ---- sun disk (can enter the FOV while scanning)
+        # ---- sun disk
         sun = world.sun_direction(t)
         sp = direction_to_pixel(sun, cam_az, cam_el, K)
         sun_r = 0.265 * DEG * K.fx
-        if world.time_of_day != "night" and sp is not None \
+        if tod != "night" and not space and sp is not None \
                 and -sun_r * 3 < sp[0] < W + sun_r * 3 and -sun_r * 3 < sp[1] < H + sun_r * 3:
             dim = 1.0 - 0.9 * max(hz.level("fog"), hz.level("rain"))
-            if world.time_of_day == "dusk":
+            if tod == "dusk":
                 dim *= 0.5
             cv2.circle(img, (int(sp[0]), int(sp[1])), int(sun_r), 300.0 + 2200.0 * dim, -1, cv2.LINE_AA)
-            self._splat(img, sp[0], sp[1], 90.0 * dim * 2 * math.pi * (sun_r * 0.9) ** 2,
-                        sun_r * 0.9, (0, 0), 0)
+            self._splat(img, sp[0], sp[1], 90.0 * dim * 2 * math.pi * (sun_r * 0.9) ** 2, sun_r * 0.9, (0, 0), 0)
 
-        # ---- rain streaks and droplets
         lr = hz.level("rain")
         if lr > 0.01:
             self._rain_layer(img, t, lr, amb)
 
-        # ---- optical blur
         blur = 0.35 * hz.level("fog") + 0.5 * turb_blur + 0.5 * lr
         if blur > 0.15:
             img = cv2.GaussianBlur(img, (0, 0), blur)
 
-        # ---- glare
         lg = hz.level("glare")
-        if lg > 0.01:
+        if lg > 0.01 and not space:
             self._glare(img, sun, cam_az, cam_el, lg, amb)
 
         img *= self._vignette
 
-        # ---- sensor
         read, hot_frac, row_sig, flick = hz.noise_params()
         np.maximum(img, 0, out=img)
         img += 2.0
@@ -226,26 +244,39 @@ class SensorRenderer:
         frame = Frame(image, t, self.frame_id, enc.az, enc.el, exposure)
         in_fov = truth_px is not None and 0 <= truth_px[0] < W and 0 <= truth_px[1] < H
         truth = Truth(t, truth_px, in_fov, occ >= 0.5, occ_kind, world.target_los(t),
-                      rng_m, cam_az, cam_el, min(255.0, peak_dn))
+                      rng_m, cam_az, cam_el, min(255.0, peak_dn), on)
         return frame, truth
 
     # --------------------------------------------------------------- helpers
-    @staticmethod
-    def _unit(p):
-        dx, dy, dz = p[0] - CAMERA_POS[0], p[1] - CAMERA_POS[1], p[2] - CAMERA_POS[2]
-        n = math.sqrt(dx * dx + dy * dy + dz * dz)
-        return dx / n, dy / n, dz / n
+    def _stars(self, img, t, cam_az, cam_el, psf, exposure, beta, turb, tod) -> None:
+        K = self.K
+        H, W = img.shape
+        dirs, mags, tw = self.world.stars().in_view(t, cam_az, cam_el, self._fov_radius_deg)
+        if mags.size == 0:
+            return
+        keep = mags < (8.6 if tod == "night" else 6.0)
+        dirs, mags = dirs[keep], mags[keep]
+        sig = 0.06 + 0.35 * turb
+        gains = np.exp(sig * self._rng.standard_normal(mags.size) - 0.5 * sig * sig)
+        ext = math.exp(-beta * 8.0)
+        base = E_REF * 3.0 * (exposure / 0.010) * ext
+        for d, m, g in zip(dirs, mags, gains):
+            p = direction_to_pixel((float(d[0]), float(d[1]), float(d[2])), cam_az, cam_el, K)
+            if p is None or not (-8 < p[0] < W + 8 and -8 < p[1] < H + 8):
+                continue
+            self._splat(img, p[0], p[1], base * 10 ** (-0.4 * (float(m) - 1.5)) * float(g), psf, (0, 0), 0)
 
-    def _image_velocity(self, t, tpos, cam_az, cam_el, raz, rel):
+    def _image_velocity(self, t, tpos, cam, cam_az, cam_el, raz, rel):
         h = 0.002
         p2 = self.world.target_pos(t + h)
-        a = direction_to_pixel(self._unit(tpos), cam_az, cam_el, self.K)
-        b = direction_to_pixel(self._unit(p2), cam_az + raz * h, cam_el + rel * h, self.K)
+        c2 = self.world.camera_pos(t + h)
+        a = direction_to_pixel(_unit(tpos, cam), cam_az, cam_el, self.K)
+        b = direction_to_pixel(_unit(p2, c2), cam_az + raz * h, cam_el + rel * h, self.K)
         if a is None or b is None:
             return (0.0, 0.0)
         return ((b[0] - a[0]) / h, (b[1] - a[1]) / h)
 
-    def _background(self, cam_az, cam_el, t, amb, maritime: bool) -> np.ndarray:
+    def _background(self, cam_az, cam_el, t, amb, sea: bool) -> np.ndarray:
         K = self.K
         H, W = K.height, K.width
         zen, hor, cloud_amp, g0, gtex = amb[:5]
@@ -259,14 +290,15 @@ class SensorRenderer:
         ppd = self.CLOUD_PPD
         drift = t * 0.02
         a = ppd * RAD2DEG / (K.fx * ce)
+        el_top = min(self.CLOUD_EL_TOP, 49.0)
         M = np.float32([[a, 0, (az_deg + 180.0 + drift) * ppd - a * K.cx],
-                        [0, ppd * RAD2DEG / K.fy, (self.CLOUD_EL_TOP - el_deg) * ppd - ppd * RAD2DEG / K.fy * K.cy]])
+                        [0, ppd * RAD2DEG / K.fy, (el_top - el_deg) * ppd - ppd * RAD2DEG / K.fy * K.cy]])
         clouds = cv2.warpAffine(self._clouds, M, (W, H), flags=cv2.INTER_LINEAR | cv2.WARP_INVERSE_MAP,
                                 borderMode=cv2.BORDER_REFLECT)
         sky = (sky_rows[:, None] + cloud_amp * clouds).astype(np.float32, copy=False)
 
         col_az = (az_deg + self._u_off * RAD2DEG / ce)
-        if maritime:
+        if sea:
             h_cols = np.full(W, -0.07 * DEG, np.float32)
         else:
             idx = ((col_az + 180.0) / self._hz_step).astype(np.int64) % self._horizon.size
@@ -286,7 +318,7 @@ class SensorRenderer:
                          [0, c2, (self.GROUND_EL_TOP - el_deg) * gp - c2 * K.cy + c2 * r0]])
         tex = cv2.warpAffine(self._ground, M2, (W, H - r0), flags=cv2.INTER_LINEAR | cv2.WARP_INVERSE_MAP,
                              borderMode=cv2.BORDER_REFLECT)
-        if maritime:
+        if sea:
             rows = np.arange(r0, H, dtype=np.float32)[:, None]
             waves = 0.5 + 0.5 * np.sin(rows * 0.9 + t * 3.0 + tex * 9.0)
             ground = g0 * 1.2 + gtex * (0.6 * tex + 0.4 * waves)
@@ -303,7 +335,7 @@ class SensorRenderer:
         H, W = img.shape
         bx, by = vel_px[0] * exposure, vel_px[1] * exposure
         blur_len = math.hypot(bx, by)
-        n = 1 if blur_len < 1.0 else min(28, 1 + int(math.ceil(blur_len)))   # continuous streak
+        n = 1 if blur_len < 1.0 else min(28, 1 + int(math.ceil(blur_len)))
         r = int(3.5 * sigma + blur_len / 2 + 2)
         x0, x1 = max(0, int(u) - r), min(W, int(u) + r + 2)
         y0, y1 = max(0, int(v) - r), min(H, int(v) + r + 2)
@@ -324,7 +356,6 @@ class SensorRenderer:
         return float(patch.max())
 
     def _draw_occluder(self, img, u, v, occ, kind, phase, amb):
-        """Soft silhouettes composited over the beacon (the beacon itself is already blocked)."""
         H, W = img.shape
         R = 50
         x0, y0 = int(u) - R, int(v) - R
@@ -372,7 +403,6 @@ class SensorRenderer:
             cv2.line(layer, (int(x), int(y)), (int(x + length * wind), int(y + length)),
                      bright * (0.4 + rs), 1, cv2.LINE_AA)
         img += layer
-        # Out-of-focus droplets on the window: local refractive blur + slight brightening.
         for i in range(int(6 * level)):
             dx, dy, dr = (float(x) for x in self._drops[i])
             cx, cy = int(dx * W), int((dy * H + t * 6.0) % H)

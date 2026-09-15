@@ -1,35 +1,43 @@
-"""Left rail: beacon pattern picker and hazard mixer."""
+"""Left sidebar: Remote terminal · Ground terminal · Environment."""
+
+import random
 
 from PySide6.QtCore import QEasingCurve, QPropertyAnimation, Qt, Signal
-from PySide6.QtWidgets import (QButtonGroup, QFrame, QGridLayout, QHBoxLayout, QLabel, QPushButton, QScrollArea,
-                               QSlider, QVBoxLayout, QWidget)
+from PySide6.QtWidgets import (QButtonGroup, QFrame, QGridLayout, QHBoxLayout, QPushButton, QScrollArea, QSlider,
+                               QStackedWidget, QVBoxLayout, QWidget)
 
 from fsoc.sim.hazards import HAZARD_INFOS
 from fsoc.sim.patterns import PATTERN_INFOS
+from fsoc.sim.terminals import AERIAL_CENTER, MOUNTS, PLATFORMS
+from .info_text import tip
 from .theme import HAZARD_COLOR, P
-from .widgets import Card, IconBadge, PatternTile, Pill, Switch, label
+from .widgets import Card, IconBadge, IconTile, InfoButton, PatternTile, Segmented, Switch, ValueSlider, label
 
 HAZARD_SHORT = {
-    "fog": "Visibility down to 2 km",
-    "rain": "Streaks, drops, attenuation",
-    "turbulence": "Scintillation & beam wander",
-    "noise": "Read noise, hot pixels",
-    "vibration": "11–21 Hz LOS jitter",
-    "glare": "Veiling glare near the sun",
-    "occlusion": "Birds, branches, cloud",
-    "decoys": "False lights near target",
+    "fog": "Visibility down to 2 km", "rain": "Streaks, drops, attenuation",
+    "turbulence": "Twinkle & beam wander", "noise": "Grainy, hot pixels",
+    "vibration": "Camera shake", "glare": "Bright haze near the sun",
+    "occlusion": "Birds, branches, cloud", "decoys": "Other lights, satellites",
 }
+
+
+def _scroll(inner: QWidget) -> QScrollArea:
+    sa = QScrollArea()
+    sa.setWidgetResizable(True)
+    sa.setFrameShape(QFrame.Shape.NoFrame)
+    sa.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+    sa.setWidget(inner)
+    return sa
 
 
 class HazardRow(QFrame):
     toggled = Signal(str, bool)
     intensity = Signal(str, float)
 
-    def __init__(self, info, parent=None) -> None:
+    def __init__(self, info, enabled: bool, level: float, parent=None) -> None:
         super().__init__(parent)
         self.key = info.key
         self.setObjectName("hazRow")
-        self.setToolTip(info.summary)
         v = QVBoxLayout(self)
         v.setContentsMargins(8, 6, 8, 6)
         v.setSpacing(2)
@@ -39,41 +47,47 @@ class HazardRow(QFrame):
         top.addWidget(self.badge)
         txt = QVBoxLayout()
         txt.setSpacing(0)
+        nrow = QHBoxLayout()
+        nrow.setSpacing(5)
         name = label(info.name, "h2")
         name.setStyleSheet("font-size: 9.6pt;")
-        txt.addWidget(name)
+        nrow.addWidget(name)
+        nrow.addWidget(InfoButton(f"<b>{info.name}</b><br>{info.summary}", size=14))
+        nrow.addStretch(1)
+        txt.addLayout(nrow)
         txt.addWidget(label(HAZARD_SHORT[info.key], "faint"))
         top.addLayout(txt, 1)
         self.switch = Switch(color=HAZARD_COLOR[info.key])
-        self.switch.toggled.connect(self._on_toggle)
         top.addWidget(self.switch)
         v.addLayout(top)
-
         self.slider_box = QWidget()
         hl = QHBoxLayout(self.slider_box)
         hl.setContentsMargins(42, 2, 2, 2)
         self.slider = QSlider(Qt.Orientation.Horizontal)
         self.slider.setRange(5, 100)
-        self.slider.setValue(int(info.default * 100))
+        self.slider.setValue(int(level * 100))
         self.slider.setStyleSheet(
             f"QSlider::sub-page:horizontal {{ background: {HAZARD_COLOR[info.key]}; border-radius: 2px; }}"
             f"QSlider::handle:horizontal {{ border-color: {HAZARD_COLOR[info.key]}; }}")
-        self.val = label(f"{int(info.default * 100)} %", "caption")
+        self.val = label(f"{int(level * 100)} %", "caption")
         self.val.setFixedWidth(40)
         self.val.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
         self.slider.valueChanged.connect(self._on_slider)
         hl.addWidget(self.slider, 1)
         hl.addWidget(self.val)
-        self.slider_box.setMaximumHeight(0)
         v.addWidget(self.slider_box)
         self._anim = QPropertyAnimation(self.slider_box, b"maximumHeight", self)
         self._anim.setDuration(180)
         self._anim.setEasingCurve(QEasingCurve.Type.OutCubic)
-        self._style(False)
+        self.switch.setChecked(enabled)
+        self.badge.active = enabled
+        self.slider_box.setMaximumHeight(30 if enabled else 0)
+        self._style(enabled)
+        self.switch.toggled.connect(self._on_toggle)
 
     def _style(self, on: bool) -> None:
-        bg = P["surface_alt"] if on else "transparent"
-        self.setStyleSheet(f"QFrame#hazRow {{ background: {bg}; border-radius: 10px; }}")
+        self.setStyleSheet(f"QFrame#hazRow {{ background: {P['surface_alt'] if on else 'transparent'};"
+                           f" border-radius: 10px; }}")
 
     def _on_toggle(self, on: bool) -> None:
         self.badge.active = on
@@ -95,76 +109,264 @@ class HazardRow(QFrame):
             self._on_toggle(on)
 
 
-class ControlRail(QScrollArea):
-    pattern_changed = Signal(str)
-    hazard_toggled = Signal(str, bool)
-    hazard_intensity = Signal(str, float)
-
-    def __init__(self, initial_pattern: str = "orbit", parent=None) -> None:
+class ControlRail(QWidget):
+    def __init__(self, engine, tab: str = "remote", parent=None) -> None:
         super().__init__(parent)
-        self.setWidgetResizable(True)
-        self.setFrameShape(QFrame.Shape.NoFrame)
-        self.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.engine = engine
+        self._rev = -1
+        v = QVBoxLayout(self)
+        v.setContentsMargins(0, 0, 0, 0)
+        v.setSpacing(10)
+        self.tabs = Segmented([("remote", "Remote B"), ("ground", "Ground A"), ("env", "Environment")], compact=True)
+        v.addWidget(self.tabs)
+        self.stack = QStackedWidget()
+        v.addWidget(self.stack, 1)
+        self.stack.addWidget(self._remote_page())
+        self.stack.addWidget(self._ground_page())
+        self.stack.addWidget(self._env_page())
+        self.tabs.changed.connect(self._tab)
+        self.tabs.set_current(tab)
+        self._tab(tab)
+        self.sync(force=True)
+
+    def current_tab(self) -> str:
+        return ("remote", "ground", "env")[self.stack.currentIndex()]
+
+    def _tab(self, key: str) -> None:
+        self.stack.setCurrentIndex({"remote": 0, "ground": 1, "env": 2}[key])
+
+    # ================================================================== remote
+    def _remote_page(self) -> QWidget:
         inner = QWidget()
         col = QVBoxLayout(inner)
         col.setContentsMargins(0, 0, 6, 0)
-        col.setSpacing(14)
+        col.setSpacing(12)
 
-        # ---- patterns
-        pc = Card("Beacon pattern", "How the remote terminal moves")
+        pc = Card("Terminal type", info=tip("platform"))
         grid = QGridLayout()
-        grid.setHorizontalSpacing(8)
-        grid.setVerticalSpacing(8)
-        self.tiles = {}
-        group = QButtonGroup(self)
-        group.setExclusive(True)
-        for i, info in enumerate(PATTERN_INFOS):
-            tile = PatternTile(info.key, info.name, info.platform)
-            tile.setToolTip(info.summary)
-            tile.clicked.connect(lambda _=False, k=info.key: self._select(k))
-            group.addButton(tile)
-            grid.addWidget(tile, i // 2, i % 2)
-            self.tiles[info.key] = tile
+        grid.setSpacing(8)
+        self.platform_tiles = {}
+        grp = QButtonGroup(self)
+        for i, plat in enumerate(PLATFORMS):
+            tile = IconTile(plat.key, plat.name, plat.key)
+            tile.setToolTip(plat.summary)
+            tile.clicked.connect(lambda _=False, k=plat.key: self._choose_platform(k))
+            grp.addButton(tile)
+            grid.addWidget(tile, i // 3, i % 3)
+            self.platform_tiles[plat.key] = tile
         pc.body.addLayout(grid)
-        self.desc = label("", "caption", wrap=True)
-        self.speed = Pill("", "accent", size=7.8)
-        drow = QHBoxLayout()
-        drow.addWidget(self.desc, 1)
-        pc.body.addLayout(drow)
-        srow = QHBoxLayout()
-        srow.addWidget(self.speed)
-        srow.addStretch(1)
-        pc.body.addLayout(srow)
         col.addWidget(pc)
 
-        # ---- hazards
-        hc = Card("Hazards", "Mix any combination — changes fade in smoothly")
-        self.clear_btn = QPushButton("Clear all")
-        self.clear_btn.setObjectName("ghost")
-        self.clear_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.clear_btn.clicked.connect(self.clear_hazards)
-        hc.header.addWidget(self.clear_btn, 0, Qt.AlignmentFlag.AlignTop)
+        mc = Card("Movement", info=tip("motion"))
+        self.pattern_grid = QGridLayout()
+        self.pattern_grid.setSpacing(8)
+        mc.body.addLayout(self.pattern_grid)
+        self.pattern_desc = label("", "caption", wrap=True)
+        mc.body.addWidget(self.pattern_desc)
+        self.drag_hint = label("Tip: drag Terminal B in the world view to steer it yourself.", "faint", wrap=True)
+        mc.body.addWidget(self.drag_hint)
+        col.addWidget(mc)
+        self._pattern_group = QButtonGroup(self)
+        self.pattern_tiles = {}
+
+        self.controls_card = Card("Motion controls", info=tip("controls"))
+        self.controls_box = QVBoxLayout()
+        self.controls_box.setSpacing(6)
+        self.controls_card.body.addLayout(self.controls_box)
+        col.addWidget(self.controls_card)
+        self.sliders = {}
+
+        bc = Card("Beacon signal", info=tip("beacon"))
+        st = self.engine.remote_state()
+        self.s_freq = ValueSlider("Blink rate", 2.0, 12.0, st["beacon_freq"], 0.1, lambda v: f"{v:.1f} Hz", tip("freq"))
+        self.s_bright = ValueSlider("Brightness", 0.05, 1.0, st["beacon_brightness"], 0.01,
+                                    lambda v: f"{v * 100:.0f} %", tip("brightness"))
+        self.s_depth = ValueSlider("Blink depth", 0.0, 1.0, st["beacon_depth"], 0.01,
+                                   lambda v: f"{v * 100:.0f} %", tip("depth"))
+        self.s_freq.changed.connect(lambda v: self.engine.set_beacon(freq_hz=v))
+        self.s_bright.changed.connect(lambda v: self.engine.set_beacon(brightness=v))
+        self.s_depth.changed.connect(lambda v: self.engine.set_beacon(depth=v))
+        for w in (self.s_freq, self.s_bright, self.s_depth):
+            bc.body.addWidget(w)
+        rnd = QPushButton("Randomise beacon")
+        rnd.setToolTip("Pick a new blink rate — watch the tracker re-learn it.")
+        rnd.clicked.connect(self._random_beacon)
+        bc.body.addWidget(rnd)
+        col.addWidget(bc)
+        col.addStretch(1)
+        return _scroll(inner)
+
+    def _random_beacon(self) -> None:
+        f = round(random.uniform(2.5, 9.5), 1)
+        self.s_freq.set_value(f)
+        self.engine.set_beacon(freq_hz=f)
+
+    def _choose_platform(self, key: str) -> None:
+        self.engine.set_platform(key)
+        self._rebuild_patterns(key, None)
+        self._rebuild_controls(key)
+
+    def _choose_pattern(self, key: str) -> None:
+        self.engine.set_pattern(key)
+        info = next(p for p in PATTERN_INFOS if p.key == key)
+        self.pattern_desc.setText(f"{info.summary}  ·  {info.speed}")
+
+    def _rebuild_patterns(self, platform: str, current) -> None:
+        while self.pattern_grid.count():
+            w = self.pattern_grid.takeAt(0).widget()
+            if w:
+                self._pattern_group.removeButton(w)
+                w.deleteLater()
+        self.pattern_tiles = {}
+        pats = [p for p in PATTERN_INFOS if p.platform == platform]
+        defaults = {"quad": "hover", "fixedwing": "orbit", "ship": "maritime", "satellite": "leo_pass",
+                    "station": "iss_pass"}
+        current = current or defaults[platform]
+        for i, info in enumerate(pats):
+            tile = PatternTile(info.key, info.name, info.platform)
+            tile.setToolTip(info.summary)
+            tile.clicked.connect(lambda _=False, k=info.key: self._choose_pattern(k))
+            self._pattern_group.addButton(tile)
+            self.pattern_grid.addWidget(tile, i // 2, i % 2)
+            self.pattern_tiles[info.key] = tile
+            if info.key == current:
+                tile.setChecked(True)
+                self.pattern_desc.setText(f"{info.summary}  ·  {info.speed}")
+        self.drag_hint.setVisible(platform in ("quad", "fixedwing", "ship"))
+
+    def _rebuild_controls(self, platform: str) -> None:
+        while self.controls_box.count():
+            w = self.controls_box.takeAt(0).widget()
+            if w:
+                w.deleteLater()
+        st = self.engine.remote_state()
+        e = self.engine
+        space = platform in ("satellite", "station")
+        s = {}
+        if space:
+            s["speed"] = ValueSlider("Time speed", 1.0, 20.0, max(1.0, st["speed"]), 0.5, lambda v: f"{v:.1f}×",
+                                     tip("time_warp"))
+            s["speed"].changed.connect(lambda v: e.set_remote(speed=v))
+            if platform == "satellite":
+                s["alt"] = ValueSlider("Orbit altitude", 350, 1500, st["orbit_alt"], 10, lambda v: f"{v:.0f} km",
+                                       tip("orbit_alt"))
+                s["alt"].slider.sliderReleased.connect(lambda: e.set_orbit(alt_km=s["alt"].value()))
+            s["max_el"] = ValueSlider("Highest point", 15, 78, st["max_el"], 1, lambda v: f"{v:.0f}°", tip("max_el"))
+            s["max_el"].slider.sliderReleased.connect(lambda: e.set_orbit(max_el=s["max_el"].value()))
+            s["heading"] = ValueSlider("Pass direction", 0, 355, st["heading"], 5, lambda v: f"{v:.0f}°", tip("heading"))
+            s["heading"].slider.sliderReleased.connect(lambda: e.set_orbit(heading=s["heading"].value()))
+            s["var"] = ValueSlider("Attitude wobble", 0.0, 1.0, st["variation"], 0.01, lambda v: f"{v * 100:.0f} %",
+                                   tip("variation"))
+            s["var"].changed.connect(lambda v: e.set_remote(variation=v))
+        else:
+            s["speed"] = ValueSlider("Speed", 0.25, 3.0, st["speed"], 0.05, lambda v: f"{v:.2f}×", tip("speed"))
+            s["speed"].changed.connect(lambda v: e.set_remote(speed=v))
+            key = st["pattern"]
+            cen = AERIAL_CENTER.get(key, (0, 170, 1900))
+            natural = (cen[0] ** 2 + cen[2] ** 2) ** 0.5 / 1000.0
+            s["range"] = ValueSlider("Distance", 0.6, 4.5, st["range_km"] or natural, 0.05,
+                                     lambda v: f"{v:.2f} km", tip("distance"))
+            s["range"].changed.connect(lambda v: e.set_remote(range_km=v))
+            s["bearing"] = ValueSlider("Direction", -45, 45, st["bearing"], 1, lambda v: f"{v:+.0f}°", tip("bearing"))
+            s["bearing"].changed.connect(lambda v: e.set_remote(bearing=v))
+            if platform != "ship":
+                s["alt"] = ValueSlider("Altitude", -100, 400, st["altitude"], 5, lambda v: f"{v:+.0f} m",
+                                       tip("altitude"))
+                s["alt"].changed.connect(lambda v: e.set_remote(altitude=v))
+            s["var"] = ValueSlider("Real-world variation", 0.0, 1.0, st["variation"], 0.01,
+                                   lambda v: f"{v * 100:.0f} %", tip("variation"))
+            s["var"].changed.connect(lambda v: e.set_remote(variation=v))
+        for w in s.values():
+            self.controls_box.addWidget(w)
+        self.sliders = s
+
+    # ================================================================== ground
+    def _ground_page(self) -> QWidget:
+        inner = QWidget()
+        col = QVBoxLayout(inner)
+        col.setContentsMargins(0, 0, 6, 0)
+        col.setSpacing(12)
+        st = self.engine.remote_state()
+
+        mc = Card("Mount", info=tip("mount"))
+        row = QHBoxLayout()
+        row.setSpacing(8)
+        grp = QButtonGroup(self)
+        self.mount_tiles = {}
+        for m in MOUNTS:
+            tile = IconTile(m.key, m.name, "ship" if m.key == "ship" else m.key)
+            tile.setToolTip(m.summary)
+            tile.clicked.connect(lambda _=False, k=m.key: self.engine.set_ground(mount=k))
+            grp.addButton(tile)
+            row.addWidget(tile)
+            self.mount_tiles[m.key] = tile
+        mc.body.addLayout(row)
+        col.addWidget(mc)
+
+        pc = Card("Position", info=tip("position"))
+        self.g_east = ValueSlider("East offset", -1500, 1500, st["ground_x"], 10, lambda v: f"{v:+.0f} m", tip("east"))
+        self.g_north = ValueSlider("North offset", -1000, 1500, st["ground_z"], 10, lambda v: f"{v:+.0f} m", tip("north"))
+        self.g_height = ValueSlider("Mast height", 2, 30, st["ground_h"], 0.5, lambda v: f"{v:.1f} m", tip("height"))
+        self.g_east.changed.connect(lambda v: self.engine.set_ground(x=v))
+        self.g_north.changed.connect(lambda v: self.engine.set_ground(z=v))
+        self.g_height.changed.connect(lambda v: self.engine.set_ground(height=v))
+        for w in (self.g_east, self.g_north, self.g_height):
+            pc.body.addWidget(w)
+        pc.body.addWidget(label("Tip: drag Terminal A in the world view to move your station.", "faint", wrap=True))
+        col.addWidget(pc)
+
+        gc = Card("Gimbal", info=tip("gimbal"))
+        self.g_slew = ValueSlider("Maximum turn speed", 5, 60, st["max_slew"], 1, lambda v: f"{v:.0f} °/s", tip("slew"))
+        self.g_slew.changed.connect(self.engine.set_max_slew)
+        gc.body.addWidget(self.g_slew)
+        col.addWidget(gc)
+        col.addStretch(1)
+        return _scroll(inner)
+
+    # ============================================================== environment
+    def _env_page(self) -> QWidget:
+        inner = QWidget()
+        col = QVBoxLayout(inner)
+        col.setContentsMargins(0, 0, 6, 0)
+        col.setSpacing(12)
+        tc = Card("Time of day", info=tip("tod"))
+        self.tod = Segmented([("day", "Day"), ("dusk", "Dusk"), ("night", "Night")])
+        self.tod.changed.connect(self.engine.set_time_of_day)
+        tc.body.addWidget(self.tod)
+        col.addWidget(tc)
+
+        hc = Card("Hazards", "Mix any combination — changes fade in smoothly", info=tip("hazards"))
+        clear = QPushButton("Clear all")
+        clear.setObjectName("ghost")
+        clear.clicked.connect(self.clear_hazards)
+        hc.header.addWidget(clear, 0, Qt.AlignmentFlag.AlignTop)
         hc.body.setSpacing(2)
+        hz = self.engine.world.hazards
         self.rows = {}
         for info in HAZARD_INFOS:
-            row = HazardRow(info)
-            row.toggled.connect(self.hazard_toggled)
-            row.intensity.connect(self.hazard_intensity)
+            row = HazardRow(info, hz.enabled[info.key], hz.intensity[info.key])
+            row.toggled.connect(lambda k, on: self.engine.set_hazard(k, on))
+            row.intensity.connect(lambda k, val: self.engine.set_hazard(k, intensity=val))
             hc.body.addWidget(row)
             self.rows[info.key] = row
         col.addWidget(hc)
         col.addStretch(1)
-        self.setWidget(inner)
-        self._select(initial_pattern, emit=False)
-
-    def _select(self, key: str, emit: bool = True) -> None:
-        info = next(p for p in PATTERN_INFOS if p.key == key)
-        self.tiles[key].setChecked(True)
-        self.desc.setText(info.summary)
-        self.speed.setText(f"speed {info.speed}")
-        if emit:
-            self.pattern_changed.emit(key)
+        return _scroll(inner)
 
     def clear_hazards(self) -> None:
         for row in self.rows.values():
             row.set_checked(False)
+
+    # ==================================================================== sync
+    def sync(self, force: bool = False) -> None:
+        """Reflect engine-side changes (e.g. drag switched to Manual, space switched to night)."""
+        if not force and self._rev == self.engine.ui_revision:
+            return
+        self._rev = self.engine.ui_revision
+        st = self.engine.remote_state()
+        plat = st["platform"]
+        self.platform_tiles[plat].setChecked(True)
+        self._rebuild_patterns(plat, st["pattern"])
+        self._rebuild_controls(plat)
+        self.mount_tiles[st["mount"]].setChecked(True)
+        self.tod.set_current(st["time_of_day"])

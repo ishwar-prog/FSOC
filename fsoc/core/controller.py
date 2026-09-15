@@ -63,8 +63,16 @@ class GimbalController:
             self._i_az *= 0.8
             self._i_el *= 0.8
 
-        want_az = g.ff_gain * ref_vaz + kp * e_az + ki * self._i_az
-        want_el = g.ff_gain * ref_vel + kp * e_el + ki * self._i_el
+        # Feedback never asks for more rate than can still be braked to zero at the target
+        # (v = sqrt(2·a·|e|)): large slews arrive fast without overshooting past the cue.
+        fb_az = kp * e_az + ki * self._i_az
+        fb_el = kp * e_el + ki * self._i_el
+        brake_az = math.sqrt(2.0 * 0.8 * self.max_accel * abs(e_az))
+        brake_el = math.sqrt(2.0 * 0.8 * self.max_accel * abs(e_el))
+        fb_az = max(-brake_az, min(brake_az, fb_az)) if abs(e_az) > math.radians(0.05) else fb_az
+        fb_el = max(-brake_el, min(brake_el, fb_el)) if abs(e_el) > math.radians(0.05) else fb_el
+        want_az = g.ff_gain * ref_vaz + fb_az
+        want_el = g.ff_gain * ref_vel + fb_el
         want_az = max(-self.max_rate, min(self.max_rate, want_az))
         want_el = max(-self.max_rate, min(self.max_rate, want_el))
 

@@ -42,6 +42,22 @@ PATTERN_INFOS: List[PatternInfo] = [
     PatternInfo("random", "Random Manoeuvre", "quad",
                 "Seeded random but smooth manoeuvres — no two runs alike.", "5–30 m/s"),
 ]
+PATTERN_INFOS += [
+    PatternInfo("transit", "Ship Transit", "ship",
+                "Vessel on a steady course across the line of sight, pitching in swell.", "7 m/s"),
+    PatternInfo("manual_quad", "Manual Drive", "quad",
+                "You steer: drag Terminal B in the world view and the drone flies there.", "≤ 18 m/s"),
+    PatternInfo("manual_fixedwing", "Manual Drive", "fixedwing",
+                "You steer: drag the aircraft to a point — it flies there and loiters.", "≤ 45 m/s"),
+    PatternInfo("manual_ship", "Manual Drive", "ship",
+                "You steer: drag the ship to a new position on the sea.", "≤ 9 m/s"),
+    PatternInfo("leo_pass", "LEO Pass", "satellite",
+                "Low-Earth-orbit smallsat rising, culminating and setting (ephemeris-cued).", "7.6 km/s"),
+    PatternInfo("geo_relay", "GEO Relay", "satellite",
+                "Geostationary relay 36 000 km away — nearly fixed, stars drift past it.", "fixed"),
+    PatternInfo("iss_pass", "ISS Pass", "station",
+                "Space-station pass at 420 km — fast, bright, sun-lit body near the beacon.", "7.7 km/s"),
+]
 PATTERN_KEYS = [p.key for p in PATTERN_INFOS]
 INFO_BY_KEY = {p.key: p for p in PATTERN_INFOS}
 
@@ -124,6 +140,15 @@ def maritime(t: float) -> Vec:
     return (sx + lat[0] * dl + lon[0] * dn, 1.5 + heave + up, sz + lat[1] * dl + lon[1] * dn)
 
 
+def transit(t: float) -> Vec:
+    sx = 700 * _s(1 / 620, t)
+    sz = 2400 + 80 * _s(1 / 300, t, 0.4)
+    _, _, heave, roll, pitch = ship_motion(1.1 * t + 13.0)
+    mast = 22.0
+    return (sx + mast * math.sin(pitch), 1.5 + heave + mast * math.cos(roll) * math.cos(pitch),
+            sz + mast * math.sin(roll))
+
+
 class RandomManoeuvre:
     def __init__(self, seed: int) -> None:
         rng = np.random.default_rng(seed + 9001)
@@ -150,7 +175,7 @@ class RandomManoeuvre:
 def make_pattern(key: str, seed: int) -> Callable[[float], Vec]:
     return {
         "hover": hover, "flyby": flyby, "orbit": orbit, "figure8": figure8,
-        "zigzag": zigzag, "spiral": spiral, "maritime": maritime,
+        "zigzag": zigzag, "spiral": spiral, "maritime": maritime, "transit": transit,
     }.get(key) or RandomManoeuvre(seed)
 
 

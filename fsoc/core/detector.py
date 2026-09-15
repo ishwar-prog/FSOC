@@ -47,7 +47,7 @@ class DetectionResult:
 class BeaconDetector:
     def __init__(self, k_sigma: float = 7.0, psf_sigma: float = 1.4,
                  bg_kernel: int = 15, min_area: int = 3, max_area: int = 1200,
-                 max_elongation: float = 3.2, max_candidates: int = 16) -> None:
+                 max_elongation: float = 3.2, max_candidates: int = 32) -> None:
         self.k_sigma = k_sigma
         self.psf_sigma = psf_sigma
         self.min_area = min_area
@@ -90,7 +90,7 @@ class BeaconDetector:
 
         cands: List[Candidate] = []
         if n > 1:
-            order = np.argsort(-stats[1:, cv2.CC_STAT_AREA])[:64] + 1
+            order = np.argsort(-stats[1:, cv2.CC_STAT_AREA])[:48] + 1
             low = med_v + 1.5 * sigma
             for i in order:
                 area = int(stats[i, cv2.CC_STAT_AREA])
@@ -108,17 +108,14 @@ class BeaconDetector:
                 patch = mf[py0:py1, px0:px1]
                 w = patch - low
                 np.maximum(w, 0.0, out=w)
-                tot = float(w.sum())
+                mom = cv2.moments(w)
+                tot = float(mom["m00"])
                 if tot <= 1e-6:
                     continue
-                ys, xs = np.mgrid[py0:py1, px0:px1]
-                mx = float((w * xs).sum() / tot)
-                my = float((w * ys).sum() / tot)
+                mx = px0 + mom["m10"] / tot
+                my = py0 + mom["m01"] / tot
                 # Intensity-moment elongation (rejects rain streaks / edges, keeps round PSFs).
-                dx, dy = xs - mx, ys - my
-                sxx = float((w * dx * dx).sum() / tot)
-                syy = float((w * dy * dy).sum() / tot)
-                sxy = float((w * dx * dy).sum() / tot)
+                sxx, syy, sxy = mom["mu20"] / tot, mom["mu02"] / tot, mom["mu11"] / tot
                 half_tr = 0.5 * (sxx + syy)
                 disc = math.sqrt(max(half_tr * half_tr - (sxx * syy - sxy * sxy), 0.0))
                 l2 = max(half_tr - disc, 1e-3)
@@ -130,10 +127,8 @@ class BeaconDetector:
                 peak_raw = float(med[by:by + bh, bx:bx + bw].max())
                 rx0, ry0 = max(0, bx - 8), max(0, by - 8)
                 rx1, ry1 = min(med.shape[1], bx + bw + 8), min(med.shape[0], by + bh + 8)
-                ring = med[ry0:ry1, rx0:rx1].astype(np.float32)
-                inner = np.zeros(ring.shape, bool)
-                inner[max(0, by - 2 - ry0):by + bh + 2 - ry0, max(0, bx - 2 - rx0):bx + bw + 2 - rx0] = True
-                ring_vals = ring[~inner]
+                region = med[ry0:ry1, rx0:rx1]
+                ring_vals = np.concatenate((region[0], region[-1], region[1:-1, 0], region[1:-1, -1]))
                 if ring_vals.size >= 8:
                     if peak_raw - float(np.percentile(ring_vals, 70)) < 4.0 * sigma + 5.0:
                         continue

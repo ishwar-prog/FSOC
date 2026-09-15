@@ -12,6 +12,7 @@ from fsoc.runtime.evaluator import KPI_ORDER
 from fsoc.runtime.validation import default_cases, run_case
 from .charts import Bullseye, ErrorTimeline, LatencyBars, LineChart
 from .theme import P
+from .info_text import tip
 from .widgets import Card, Pill, label
 
 
@@ -69,26 +70,29 @@ class AnalyticsPage(QScrollArea):
         grid.setHorizontalSpacing(16)
         grid.setVerticalSpacing(16)
         c1 = Card("Tracking error over time", "Centroid error (lavender) vs 10 px target · pointing error (blue) · "
-                                              "state band below")
+                                              "state band below", info=tip("timeline"))
         self.timeline = ErrorTimeline(30.0)
         self.timeline.setMinimumHeight(250)
         c1.body.addWidget(self.timeline)
         grid.addWidget(c1, 0, 0, 1, 2)
 
-        c2 = Card("Centroid scatter", "Detected − true centre, last 10 s · rings at 1, 5, 10 px")
+        c2 = Card("Centroid scatter", "Detected − true centre, last 10 s · rings at 1, 5, 10 px", info=tip("scatter"))
         self.bull = Bullseye()
         self.bull.setMinimumHeight(260)
         c2.body.addWidget(self.bull)
         grid.addWidget(c2, 0, 2)
 
-        c3 = Card("Signal quality", "Beacon SNR of the associated detection and track confidence")
-        self.signal = LineChart([("snr", "SNR (dB)", "accent", 2.0), ("conf", "Confidence (%)", "mint", 1.4)],
+        c3 = Card("Signal quality", "Beacon SNR, track confidence and how sure the tracker is it holds the beacon",
+                  info=tip("signal"))
+        self.signal = LineChart([("snr", "SNR (dB)", "accent", 2.0), ("conf", "Confidence (%)", "mint", 1.4),
+                                 ("idp", "Beacon identity (%)", "butter", 1.4)],
                                 "", y_range=(0, 60))
         self.signal.setMinimumHeight(210)
         c3.body.addWidget(self.signal)
         grid.addWidget(c3, 1, 0)
 
-        c4 = Card("Loop rates", "Vision pipeline FPS, control loop Hz and GUI render Hz vs 20 / 30 thresholds")
+        c4 = Card("Loop rates", "Vision pipeline FPS, control loop Hz and GUI render Hz vs 20 / 30 thresholds",
+                  info=tip("rates"))
         self.rates = LineChart([("vision", "Vision FPS", "accent", 2.0), ("control", "Control Hz", "mint", 1.6),
                                 ("render", "Render Hz", "sky", 1.6)], "",
                                thresholds=((20, "peach"), (30, "butter")), y_range=(0, 70))
@@ -96,7 +100,7 @@ class AnalyticsPage(QScrollArea):
         c4.body.addWidget(self.rates)
         grid.addWidget(c4, 1, 1)
 
-        c5 = Card("Processing budget", "Per-frame latency of each pipeline stage")
+        c5 = Card("Processing budget", "Per-frame latency of each pipeline stage", info=tip("budget"))
         self.latency = LatencyBars()
         c5.body.addWidget(self.latency)
         exp = QHBoxLayout()
@@ -119,8 +123,9 @@ class AnalyticsPage(QScrollArea):
         col.addLayout(grid)
 
         # ---- validation suite
-        vc = Card("Validation suite", "Deterministic cold-start runs of every beacon pattern and every hazard, "
-                                      "each with an injected 2.4 s blockage · scored against all SIH targets")
+        vc = Card("Validation suite", "Deterministic cold-start runs of every terminal type, pattern and hazard, "
+                                      "each with an injected 2.4 s blockage · scored against all SIH targets",
+                  info=tip("suite"))
         self.suite_pill = Pill("not run", "faint")
         vc.header.addWidget(self.suite_pill, 0, Qt.AlignmentFlag.AlignTop)
         ctl = QHBoxLayout()
