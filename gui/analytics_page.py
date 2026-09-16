@@ -2,6 +2,7 @@
 
 import os
 import threading
+import time
 
 from PySide6.QtCore import QObject, Qt, QUrl, Signal
 from PySide6.QtGui import QColor, QDesktopServices
@@ -9,7 +10,8 @@ from PySide6.QtWidgets import (QComboBox, QFrame, QGridLayout, QHBoxLayout, QHea
                                QScrollArea, QTableWidget, QTableWidgetItem, QVBoxLayout, QWidget)
 
 from fsoc.runtime.evaluator import KPI_ORDER
-from fsoc.runtime.validation import default_cases, run_case
+from fsoc.runtime.validation import default_cases, run_suite
+from .camera_view import CameraView
 from .charts import Bullseye, ErrorTimeline, LatencyBars, LineChart
 from .theme import P
 from .info_text import tip
@@ -18,7 +20,9 @@ from .widgets import Card, Pill, label
 
 class _Bridge(QObject):
     progress = Signal(int, int, object)
-    done = Signal()
+    done = Signal(bool)
+    case_started = Signal(int, int, str)
+    frame = Signal(object)
 
 
 class StatTile(QFrame):
@@ -135,15 +139,41 @@ class AnalyticsPage(QScrollArea):
         self.run_btn = QPushButton("Run validation suite")
         self.run_btn.setObjectName("primary")
         self.run_btn.clicked.connect(self._run_suite)
+        self.stop_btn = QPushButton("Stop")
+        self.stop_btn.setObjectName("ghost")
+        self.stop_btn.setEnabled(False)
+        self.stop_btn.setToolTip("Abort the running suite immediately — right in the middle of a case if need be.")
+        self.stop_btn.clicked.connect(self._stop_suite)
         self.progress = QProgressBar()
         self.progress.setFixedHeight(8)
         self.progress.setTextVisible(False)
         ctl.addWidget(self.duration)
         ctl.addWidget(self.run_btn)
+        ctl.addWidget(self.stop_btn)
         ctl.addWidget(self.progress, 1)
         vc.body.addLayout(ctl)
         vc.body.addWidget(label("The live simulation pauses while the suite runs so each case gets the CPU.",
                                 "faint"))
+
+        # ---- live preview: watch the suite actually run, case by case
+        prev_row = QHBoxLayout()
+        prev_row.setSpacing(12)
+        pcol = QVBoxLayout()
+        self.suite_case_lbl = label("Not running", "h2")
+        pcol.addWidget(self.suite_case_lbl)
+        self.suite_state_lbl = label("Press “Run validation suite” to watch it work through every case live.",
+                                     "faint", wrap=True)
+        pcol.addWidget(self.suite_state_lbl)
+        pcol.addStretch(1)
+        prev_row.addLayout(pcol, 1)
+        self.suite_preview = CameraView(self.engine.K)
+        self.suite_preview.setFixedHeight(190)
+        self.suite_preview.setMinimumWidth(260)
+        for k in ("truth", "detections", "identity", "search", "zoom"):
+            self.suite_preview.set_layer(k, True)
+        prev_row.addWidget(self.suite_preview, 1)
+        vc.body.addLayout(prev_row)
+
         self.table = QTableWidget(0, 8)
         self.table.setHorizontalHeaderLabels(["Case", "Group", "Acquisition", "Error", "Loss", "Re-acq",
                                               "Capacity", "Result"])
@@ -165,7 +195,10 @@ class AnalyticsPage(QScrollArea):
         self._bridge = _Bridge()
         self._bridge.progress.connect(self._on_progress)
         self._bridge.done.connect(self._on_done)
+        self._bridge.case_started.connect(self._on_case_started)
+        self._bridge.frame.connect(self._on_suite_frame)
         self._suite_thread = None
+        self._stop_event = None
         self._was_paused = False
         self._passed = 0
 
@@ -217,30 +250,65 @@ class AnalyticsPage(QScrollArea):
         self.progress.setRange(0, len(cases))
         self.progress.setValue(0)
         self.run_btn.setEnabled(False)
+        self.stop_btn.setEnabled(True)
         self._passed = 0
         self.suite_pill.set_tone("sky", f"running 0 / {len(cases)}")
+        self.suite_state_lbl.setText("Starting…")
         self._was_paused = self.engine.paused
         self.engine.set_paused(True)
+        stop_event = threading.Event()
+        self._stop_event = stop_event
+        last_emit = [0.0]
+
+        def on_frame(snap):
+            now = time.perf_counter()
+            if now - last_emit[0] < 0.1:            # ~10 Hz is plenty for a human to watch
+                return
+            last_emit[0] = now
+            self._bridge.frame.emit(snap)
+
+        def progress(i, n, res):
+            self._bridge.progress.emit(i, n, res)
+            if i < n and not stop_event.is_set():
+                self._bridge.case_started.emit(i, n, cases[i].name)
+
+        self._bridge.case_started.emit(0, len(cases), cases[0].name)
 
         def work():
-            for i, case in enumerate(cases):
-                try:
-                    res = run_case(case, dur)
-                except Exception as ex:  # keep the GUI alive whatever happens
-                    res = {"case": case, "error": str(ex), "passed": False}
-                self._bridge.progress.emit(i + 1, len(cases), res)
-            self._bridge.done.emit()
+            try:
+                run_suite(cases, dur, progress=progress, should_stop=stop_event.is_set, on_frame=on_frame)
+            except Exception:
+                pass  # keep the GUI alive whatever happens; the table shows what completed
+            self._bridge.done.emit(stop_event.is_set())
 
         self._suite_thread = threading.Thread(target=work, daemon=True, name="validation")
         self._suite_thread.start()
+
+    def _stop_suite(self) -> None:
+        if self._stop_event is not None:
+            self._stop_event.set()
+            self.stop_btn.setEnabled(False)
+            self.suite_state_lbl.setText("Stopping…")
+
+    def _on_case_started(self, i: int, n: int, name: str) -> None:
+        self.suite_case_lbl.setText(f"Case {i + 1} / {n} — {name}")
+        self.suite_state_lbl.setText("Running…")
+
+    def _on_suite_frame(self, snap) -> None:
+        self.suite_preview.set_snapshot(snap)
+        o = snap.out
+        self.suite_state_lbl.setText(f"t = {snap.t:5.1f} s · {o.state}")
 
     def _on_progress(self, i: int, n: int, res: dict) -> None:
         self.progress.setValue(i)
         case = res["case"]
         row = self.table.rowCount()
         self.table.insertRow(row)
+        stopped = res.get("summary", {}).get("stopped") if "summary" in res else None
         if "error" in res:
             vals = [case.name, case.group, "—", "—", "—", "—", "—", "ERROR"]
+        elif stopped:
+            vals = [case.name, case.group, "—", "—", "—", "—", "—", "STOPPED"]
         else:
             s = res["summary"]
 
@@ -254,16 +322,25 @@ class AnalyticsPage(QScrollArea):
         for col, v in enumerate(vals):
             it = QTableWidgetItem(v)
             if col == 7:
-                it.setForeground(QColor(P["mint"] if v == "PASS" else P["peach"]))
+                tone = P["mint"] if v == "PASS" else (P["muted"] if v == "STOPPED" else P["peach"])
+                it.setForeground(QColor(tone))
                 it.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
             elif col >= 2:
                 it.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
             self.table.setItem(row, col, it)
         self.suite_pill.set_tone("sky", f"running {i} / {n}")
 
-    def _on_done(self) -> None:
+    def _on_done(self, was_stopped: bool) -> None:
         n = self.table.rowCount()
         self.run_btn.setEnabled(True)
-        self.suite_pill.set_tone("mint" if self._passed == n else "peach", f"{self._passed} / {n} cases pass")
+        self.stop_btn.setEnabled(False)
+        self._stop_event = None
+        if was_stopped:
+            self.suite_pill.set_tone("peach", f"stopped · {self._passed} / {n} cases pass")
+            self.suite_state_lbl.setText("Stopped by user.")
+        else:
+            self.suite_pill.set_tone("mint" if self._passed == n else "peach", f"{self._passed} / {n} cases pass")
+            self.suite_state_lbl.setText("Finished.")
+        self.suite_case_lbl.setText("Not running")
         if not self._was_paused:
             self.engine.set_paused(False)

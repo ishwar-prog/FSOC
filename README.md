@@ -36,6 +36,10 @@ Logs (per-frame CSV + JSON summary) and a saved beacon signature are written to 
 | Easier sidebar and info buttons | Sidebar split into **Remote B · Ground A · Environment**. Every section and every technical readout has an **(i)** button that explains it in plain words on hover. |
 | Remove the System & inputs page | Removed. The app has **Live tracking** and **Analytics**. |
 | Dark mode | One-click light/dark theme; layout and settings are kept when switching. |
+| Watch the validation suite actually run, and stop it | The suite's card now shows a **live camera preview** of whichever case is running — which case, its elapsed time and state — updated as it goes, plus a **Stop** button that aborts immediately, even mid-case, and marks the interrupted row STOPPED rather than pass/fail. |
+| Show the camera's view angle, not a laser beam | The link between the terminals is now drawn as the camera's real field of view — a wedge that widens with range and tints to the tracker's state colour when locked — instead of a beam line, in both the ground/sea perspective and the space schematic. |
+| A second satellite, for two-satellite links | Ground A can itself be **a satellite** (`Mount → Satellite`): its own LEO orbit, altitude/inclination/heading sliders, a satellite icon and label in the world view. Pair it with a LEO/GEO/ISS pattern on Remote B for a genuine satellite-to-satellite crosslink — both ends moving, both needing to find and hold the other's beacon. |
+| Make it work on video | **Environment → Input source → Load video…** swaps the simulator for a real recorded clip; the identical detector, identifier, Kalman tracker and gimbal controller run on it unchanged. There is no ground truth for a recording, so tracking error / target loss / re-acquisition read "—"; acquisition, processing speed and camera update rate are still measured live. **Back to simulation** returns to the simulator. |
 
 ---
 
@@ -115,7 +119,7 @@ All motion is a smooth analytic function of time with platform-realistic speeds 
 | Satellite | LEO Pass · GEO Relay | Ephemeris-cued (σ 0.5°); pass geometry gives the real 0.1–1 °/s LOS rates |
 | Space station | ISS Pass | Fast, bright sun-lit body beside the beacon (hardest at dusk) |
 
-Ground terminal A: fixed pier, vehicle (road motion + residual jitter after INS stabilisation) or ship deck.
+Ground terminal A: fixed pier, vehicle (road motion + residual jitter after INS stabilisation), ship deck, or **satellite** — its own LEO orbit (altitude / inclination / heading), for a satellite-to-satellite crosslink when paired with a LEO/GEO/ISS pattern on Remote B.
 
 ## 5. Beacon identification — how it works
 
@@ -188,7 +192,7 @@ The camera is a 640×480 NIR (850 nm) sensor with a 4°×3° field of view. Time
 
 ## 8. Adding video and hardware (next stages)
 
-Only the frame source and the gimbal change; `TrackingPipeline` and `GimbalController` are reused as-is.
+Only the frame source and the gimbal change; `TrackingPipeline` and `GimbalController` are reused as-is. **Video is already wired into the app**: Live tracking → Environment → Input source → *Load video…* runs the identical pipeline on a recorded `.mp4`/`.avi`/`.mov`/`.mkv`, live, in the GUI (see section 9); *Back to simulation* returns to the simulator. The snippet below is the same thing headless, and the pattern hardware follows too.
 
 ```python
 from fsoc.core import TrackingPipeline, GimbalController, CameraIntrinsics
@@ -211,14 +215,14 @@ while (frame := src.read()) is not None:
 ## 9. Interface tour
 
 - **Live tracking**
-  - *Left rail* — **Remote B** (terminal type, movement, motion controls, beacon signal) · **Ground A** (mount, position, gimbal) · **Environment** (time of day, hazards).
+  - *Left rail* — **Remote B** (terminal type, movement, motion controls, beacon signal) · **Ground A** (mount — fixed / vehicle / ship / satellite, position or orbit, gimbal) · **Environment** (input source — simulation or a loaded video, time of day, hazards).
   - *Centre* — camera sensor (detections, identity labels, track brackets, ±10 px ring, scan path, sub-pixel zoom) with live readouts, and the world view:
     - aircraft/ships: 3-D scene — drag B to steer, drag A to move, drag space to orbit, scroll to zoom;
     - spacecraft: orbit schematic with pass progress and a sky plot.
 
     Drag the splitters to resize; ⤢ expands one view.
   - *Right rail* — the six mission targets, beacon identity, test buttons.
-- **Analytics** — error timeline with state band, centroid bullseye, SNR / confidence / identity, loop rates vs thresholds, per-stage latency budget, session export and the in-app validation suite.
+- **Analytics** — error timeline with state band, centroid bullseye, SNR / confidence / identity, loop rates vs thresholds, per-stage latency budget, session export and the in-app validation suite, with a live camera preview of whichever case is running and a Stop button.
 
 ## 10. Project layout
 

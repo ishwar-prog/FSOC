@@ -227,6 +227,39 @@ class OrbitPass:
         return (tau % self.period) / self.period
 
 
+class SatelliteOrbit:
+    """A LEO orbit for a terminal that is itself a satellite, expressed in the same
+    station-centred local-tangent-plane frame `OrbitPass` uses for the remote terminal — a
+    deliberately simple approximation (both bodies "orbit" one shared local origin rather than
+    Earth's true centre) that avoids an Earth-centred-frame rewrite while still giving two
+    independently moving platforms with realistic orbital angular rates and a genuinely varying
+    relative geometry, which is what actually makes an inter-satellite link a tracking problem.
+
+    That local tangent plane is only a valid approximation within roughly 90° of its own tangent
+    point, so motion is a back-and-forth sweep of amplitude `A` rather than a full revolution —
+    dθ/dτ at the centre of the sweep still equals the true circular-orbit rate `omega`, so the
+    peak angular speed the tracker has to follow is realistic even though the excursion is capped.
+    """
+
+    def __init__(self, alt_km: float, incl_deg: float, heading_deg: float, phase_deg: float = 0.0,
+                 sweep_deg: float = 32.0) -> None:
+        self.r = RE + alt_km * 1000.0
+        self.omega = math.sqrt(MU / self.r ** 3)
+        a = heading_deg * DEG
+        z = (0.0, 1.0, 0.0)
+        w = (math.cos(a), 0.0, -math.sin(a))
+        g = incl_deg * DEG
+        self.u = tuple(math.cos(g) * z[i] + math.sin(g) * w[i] for i in range(3))
+        self.v = (math.sin(a), 0.0, math.cos(a))
+        self.theta0 = phase_deg * DEG
+        self.amp = sweep_deg * DEG
+
+    def position(self, tau: float) -> Vec:
+        th = self.theta0 + self.amp * math.sin(self.omega * tau / self.amp)
+        c, s = math.cos(th), math.sin(th)
+        return tuple(self.r * (c * self.u[i] + s * self.v[i]) - (RE if i == 1 else 0.0) for i in range(3))
+
+
 class GeoRelay:
     """Geostationary relay (LCRD-class): fixed in the sky, 36 000 km slant range, tiny drift."""
 
@@ -433,6 +466,8 @@ MOUNTS: List[MountInfo] = [
     MountInfo("fixed", "Fixed station", "Tripod / observatory pier — no platform motion."),
     MountInfo("vehicle", "Vehicle", "Terminal on a truck driving a road; INS keeps pointing stable."),
     MountInfo("ship", "Ship deck", "Stabilised deck mount on a vessel in a seaway."),
+    MountInfo("satellite", "Satellite", "Your own terminal is in low Earth orbit too — a satellite-to-satellite "
+                                        "crosslink, so both ends are moving."),
 ]
 
 
@@ -443,6 +478,14 @@ class GroundTerminal:
         self.z = SmoothParam(0.0, 3.0)
         self.height = SmoothParam(6.0, 2.0)
         self._mount_t = -1e9
+        self.sat_alt_km = 780.0
+        self.sat_incl = 53.0
+        self.sat_heading = 120.0
+        self._orbit = SatelliteOrbit(self.sat_alt_km, self.sat_incl, self.sat_heading, 20.0)
+
+    @property
+    def space(self) -> bool:
+        return self.mount == "satellite"
 
     def set_mount(self, t: float, mount: str) -> None:
         self.mount = mount
@@ -457,7 +500,19 @@ class GroundTerminal:
         if height is not None:
             self.height.set(t, height)
 
+    def set_orbit(self, alt_km: Optional[float] = None, incl: Optional[float] = None,
+                  heading: Optional[float] = None) -> None:
+        if alt_km is not None:
+            self.sat_alt_km = alt_km
+        if incl is not None:
+            self.sat_incl = incl
+        if heading is not None:
+            self.sat_heading = heading
+        self._orbit = SatelliteOrbit(self.sat_alt_km, self.sat_incl, self.sat_heading, 20.0)
+
     def position(self, t: float) -> Vec:
+        if self.mount == "satellite":
+            return self._orbit.position(t)
         x, y, z = self.x.value(t), self.height.value(t), self.z.value(t)
         w = _smoothstep((t - self._mount_t) / 3.0)
         if self.mount == "vehicle":
@@ -477,4 +532,7 @@ class GroundTerminal:
         if self.mount == "ship":
             a = 0.03 * DEG
             return a * math.sin(TAU * 0.21 * t), a * math.sin(TAU * 0.17 * t + 0.6)
+        if self.mount == "satellite":
+            a = 0.003 * DEG                      # reaction-wheel micro-jitter — very fine pointing
+            return a * math.sin(TAU * 3.1 * t), a * math.sin(TAU * 2.6 * t + 0.9)
         return 0.0, 0.0

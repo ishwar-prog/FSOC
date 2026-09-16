@@ -78,6 +78,15 @@ class SensorRenderer:
     GROUND_EL_TOP = 2.0
 
     def __init__(self, K: CameraIntrinsics, world: SimWorld, gimbal, seed: int = 42) -> None:
+        # cv2.randn() (used below for shot/read noise) draws from OpenCV's own C++-level RNG,
+        # which is process-global and keeps advancing across every SensorRenderer that has ever
+        # existed in this process — not reset just because a new instance was constructed. Left
+        # alone, two runs of the identical (seed, pattern, hazards) case render different noise
+        # depending on how many earlier renders happened first in this process, which a nonlinear
+        # gated tracker can amplify into a completely different outcome. Seeding it explicitly
+        # here makes every render deterministic in `seed` alone, matching every other RNG in this
+        # class.
+        cv2.setRNGSeed(int(seed) * 2654435761 % (2 ** 31))
         self.K = K
         self.world = world
         self.gimbal = gimbal
@@ -115,6 +124,7 @@ class SensorRenderer:
         self._drops = rs.random((8, 3)).astype(np.float32)
 
     def reseed(self, seed: int) -> None:
+        cv2.setRNGSeed(int(seed) * 2654435761 % (2 ** 31))
         self._rng = np.random.default_rng(seed + 77)
 
     # ------------------------------------------------------------------ render
@@ -149,7 +159,7 @@ class SensorRenderer:
 
         aoa_x, aoa_y, scint, turb_blur = hz.turbulence()
         psf = math.hypot(1.3, turb_blur)
-        space = world.remote.space
+        space = world.space_scene
         # the atmosphere only extends ~10 km for extinction purposes
         atm_km_target = lambda r_km: min(r_km, 8.0) if space else r_km
 

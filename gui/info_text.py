@@ -56,7 +56,10 @@ INFO = {
                  "faster and are closer.",
     "max_el": "<b>Highest point of the pass</b><br>How high in the sky the satellite climbs. 90° would "
               "be straight overhead.",
-    "heading": "<b>Pass direction</b><br>The compass direction the satellite travels across the sky.",
+    "heading": "<b>Pass direction / orbital heading</b><br>The compass direction the satellite travels across "
+               "the sky (or, for a satellite terminal, the direction its own orbit runs).",
+    "incl": "<b>Inclination</b><br>The tilt of the orbit plane. A different tilt from Remote B's orbit means the "
+            "range between the two satellites keeps changing — a real crosslink tracking problem.",
     "beacon": "<b>Beacon signal</b><br>The light the remote terminal sends so it can be found. Real "
               "beacons blink rapidly on and off in a fixed rhythm. The tracker is not told these values — "
               "it has to learn them.",
@@ -75,6 +78,11 @@ INFO = {
     "gimbal": "<b>Gimbal</b><br>The motorised mount that turns the camera left/right and up/down.",
     "slew": "<b>Maximum turn speed</b><br>The fastest the gimbal is allowed to swing the camera.",
     # ---- environment
+    "input_source": "<b>Input source</b><br>Swap the simulator for a real recorded video and the same "
+                    "detector, identifier and tracker run on it unchanged — this is what makes the "
+                    "algorithms hardware-ready. A video has no known true beacon position, so the numbers "
+                    "that need one (tracking error, target loss, re-acquisition) show “—”; acquisition, "
+                    "processing speed and camera update rate are still measured live.",
     "tod": "<b>Time of day</b><br>Changes sky brightness. Satellites are usually tracked at night or dusk, "
            "when the sky is dark.",
     "hazards": "<b>Hazards</b><br>Real-world problems that make tracking harder. Switch on any "

@@ -60,8 +60,13 @@ def default_cases() -> List[Case]:
 
 
 def run_case(case: Case, duration_s: float = 40.0, seed: int = 42,
-             block_at: float = 20.0, block_s: float = 2.4) -> dict:
+             block_at: float = 20.0, block_s: float = 2.4,
+             on_frame: Optional[Callable[[object], None]] = None,
+             should_stop: Optional[Callable[[], bool]] = None,
+             on_engine: Optional[Callable[[Engine], None]] = None) -> dict:
     eng = Engine(seed=seed, pattern=case.pattern)
+    if on_engine is not None:
+        on_engine(eng)
     if case.time_of_day:
         eng.world.time_of_day = case.time_of_day
     for key, lvl in case.hazards.items():
@@ -73,22 +78,27 @@ def run_case(case: Case, duration_s: float = 40.0, seed: int = 42,
     if case.speed != 1.0:
         eng.world.remote.warp._seg = [(0.0, 0.0, case.speed, case.speed)]
     events = {block_at: lambda e: e.world.hazards.force_block(block_at, block_s)}
-    res = eng.run_headless(duration_s, events)
-    passed = all(res["metrics"][k]["status"] in ("pass", "standby") for k in KPI_ORDER)
+    res = eng.run_headless(duration_s, events, on_frame=on_frame, should_stop=should_stop)
+    passed = (not res["summary"].get("stopped")
+              and all(res["metrics"][k]["status"] in ("pass", "standby") for k in KPI_ORDER))
     res.update(case=case, passed=passed)
     return res
 
 
 def run_suite(cases: Optional[List[Case]] = None, duration_s: float = 25.0, seed: int = 42,
               progress: Optional[Callable[[int, int, dict], None]] = None,
-              should_stop: Optional[Callable[[], bool]] = None) -> List[dict]:
+              should_stop: Optional[Callable[[], bool]] = None,
+              on_frame: Optional[Callable[[object], None]] = None,
+              on_engine: Optional[Callable[[Engine], None]] = None) -> List[dict]:
     cases = cases or default_cases()
     results = []
     for i, c in enumerate(cases):
         if should_stop and should_stop():
             break
-        r = run_case(c, duration_s, seed)
+        r = run_case(c, duration_s, seed, on_frame=on_frame, should_stop=should_stop, on_engine=on_engine)
         results.append(r)
         if progress:
             progress(i + 1, len(cases), r)
+        if r["summary"].get("stopped"):
+            break
     return results

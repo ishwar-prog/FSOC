@@ -193,7 +193,11 @@ class LosKalmanTracker:
         self._r_adapt = min((2.5e-3) ** 2, max(0.0, 0.9 * self._r_adapt + 0.1 * excess))
 
         if nis > 13.8 and bias > 0.6:
-            self._q_boost = min(40.0, self._q_boost * 2.5)
+            # Capped well below the old 40x: a true manoeuvre still gets a strong boost, but a
+            # brief run of same-signed innovations from high-frequency mount vibration (aliased
+            # by the ~30 Hz sample rate into something that looks briefly biased) can no longer
+            # blow the covariance up enough to make the filter's own velocity estimate run away.
+            self._q_boost = min(10.0, self._q_boost * 2.5)
         else:
             self._q_boost = max(1.0, self._q_boost * 0.9)
         self._clamp()

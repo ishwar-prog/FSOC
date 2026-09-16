@@ -40,7 +40,7 @@ class SimWorld:
         self.ground = GroundTerminal()
         self.hazards = HazardField(seed)
         self.beacon = BeaconSpec()
-        self.time_of_day = "night" if self.remote.space else "day"
+        self.time_of_day = "night" if self.space_scene else "day"
         self._stars: Optional[StarCatalog] = None
         self._stars_seed = None
         self.reset(seed)
@@ -53,6 +53,12 @@ class SimWorld:
     @property
     def domain(self) -> str:
         return self.remote.platform.domain
+
+    @property
+    def space_scene(self) -> bool:
+        """True when either end of the link is in space: the remote terminal, or Terminal A
+        itself when it is mounted as a satellite (an inter-satellite crosslink)."""
+        return self.remote.space or self.ground.space
 
     def reset(self, seed: int) -> None:
         self.seed = seed
@@ -121,7 +127,7 @@ class SimWorld:
         k = math.floor(t * self.CUE_RATE_HZ)
         if self._cue_cache[0] == k:
             return self._cue_cache[1]
-        space = self.remote.space
+        space = self.space_scene
         ts = k / self.CUE_RATE_HZ
         tm = ts - 0.15
         az, el = self.target_los(tm)
@@ -153,7 +159,7 @@ class SimWorld:
         Many blink — obstruction lights, hazard lamps, strobes, another laser link —
         so only a *learned* signature separates them from the beacon."""
         lvl = self.hazards.level("decoys")
-        if lvl <= 0.01 or self.remote.space:
+        if lvl <= 0.01 or self.space_scene:
             return []
         rng = random.Random(self._decoy_seed * 977 + 3)
         base_b = self._anchor_bearing()
@@ -189,7 +195,7 @@ class SimWorld:
         return lights
 
     def space_objects(self, t: float, az: float, el: float) -> List[Tuple[float, float, float]]:
-        if not self.remote.space:
+        if not self.space_scene:
             return []
         lvl = 0.35 + 0.65 * self.hazards.level("decoys")
         objs = self.clutter.objects(t, az, el, lvl)

@@ -49,7 +49,7 @@ class WorldView(QWidget):
 
     # ------------------------------------------------------------- interaction
     def _space(self) -> bool:
-        return self.engine.world.remote.space
+        return self.engine.world.space_scene
 
     def mousePressEvent(self, e) -> None:
         pos = e.position()
@@ -244,10 +244,14 @@ class WorldView(QWidget):
 
         rng_t = math.dist(tpos, cam)
         f, r, u = gimbal_basis(gaz, gel)
+        locked = state in ("LOCKED", "COASTING")
+        fcol = scol if locked else c("accent")
         if qh:
+            # What the camera can actually see, not a beam: its real 4°x3° field of view,
+            # drawn out to the target's range. Locked, it tints to the tracker state colour.
             end = self.proj(cam[0] + f[0] * rng_t, cam[1] + f[1] * rng_t, cam[2] + f[2] * rng_t)
             if end:
-                p.setPen(QPen(c("accent", 150), 1.2, Qt.PenStyle.DashLine))
+                p.setPen(QPen(QColor(fcol.red(), fcol.green(), fcol.blue(), 120), 1.0, Qt.PenStyle.DashLine))
                 p.drawLine(qh, end)
             tx, ty = math.tan(2.0 * DEG), math.tan(1.5 * DEG)
             corners = []
@@ -260,8 +264,8 @@ class WorldView(QWidget):
                 for q in corners[1:]:
                     path.lineTo(q)
                 path.closeSubpath()
-                p.setPen(QPen(c("accent", 200), 1.2))
-                p.setBrush(c("accent", 45))
+                p.setPen(QPen(QColor(fcol.red(), fcol.green(), fcol.blue(), 210), 1.6 if locked else 1.2))
+                p.setBrush(QColor(fcol.red(), fcol.green(), fcol.blue(), 70 if locked else 40))
                 p.drawPath(path)
 
         if s and s.out.state in ("SEARCH", "REACQUIRE") and qh:
@@ -277,12 +281,6 @@ class WorldView(QWidget):
             p.setBrush(c("text", 40))
             p.drawEllipse(qs, 9, 3.5)
         if qt and qh:
-            locked = state in ("LOCKED", "COASTING")
-            p.setPen(QPen(QColor(scol.red(), scol.green(), scol.blue(), 70 if locked else 35), 7,
-                          Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap))
-            p.drawLine(qh, qt)
-            p.setPen(QPen(scol, 1.8 if locked else 1.0, Qt.PenStyle.SolidLine if locked else Qt.PenStyle.DashLine))
-            p.drawLine(qh, qt)
             if s and s.truth.occluded:
                 self._occluder(p, qh + (qt - qh) * 0.82, s.truth.occlusion_kind, anim)
         if qt:
@@ -634,22 +632,43 @@ class WorldView(QWidget):
             p.setPen(QPen(QColor(168, 151, 234, 200), 2.0))
             p.drawPath(self._polyline(path_vis))
         sat = to_screen(tpos)
-        # beam and FOV
+        # What the camera can actually see, not a beam: a wedge widening with range that stands
+        # for its field of view (exaggerated for legibility, like the rest of this schematic).
         locked = state in ("LOCKED", "COASTING")
-        p.setPen(QPen(QColor(scol.red(), scol.green(), scol.blue(), 80 if locked else 40), 7, Qt.PenStyle.SolidLine,
-                      Qt.PenCapStyle.RoundCap))
+        fcol = scol if locked else c("accent")
+        dx, dy = sat.x() - station.x(), sat.y() - station.y()
+        dist_px = math.hypot(dx, dy)
+        if dist_px > 1e-3:
+            ux, uy = dx / dist_px, dy / dist_px
+            px, py = -uy, ux
+            half_w = max(4.0, min(46.0, 0.05 * dist_px))
+            cone = QPainterPath()
+            cone.moveTo(station)
+            cone.lineTo(sat.x() + px * half_w, sat.y() + py * half_w)
+            cone.lineTo(sat.x() - px * half_w, sat.y() - py * half_w)
+            cone.closeSubpath()
+            p.setPen(QPen(QColor(fcol.red(), fcol.green(), fcol.blue(), 190), 1.4 if locked else 1.0))
+            p.setBrush(QColor(fcol.red(), fcol.green(), fcol.blue(), 55 if locked else 30))
+            p.drawPath(cone)
+        p.setPen(QPen(QColor(fcol.red(), fcol.green(), fcol.blue(), 140), 1.0, Qt.PenStyle.DashLine))
         p.drawLine(station, sat)
-        p.setPen(QPen(scol, 1.8 if locked else 1.0, Qt.PenStyle.SolidLine if locked else Qt.PenStyle.DashLine))
-        p.drawLine(station, sat)
-        # observatory dome
-        p.setPen(Qt.PenStyle.NoPen)
-        p.setBrush(QColor("#E8E4F5"))
-        p.drawRect(QRectF(station.x() - 12, station.y() - 6, 24, 8))
-        dome = QPainterPath()
-        dome.moveTo(station.x() - 12, station.y() - 6)
-        dome.arcTo(QRectF(station.x() - 12, station.y() - 18, 24, 24), 180, -180)
-        dome.closeSubpath()
-        p.drawPath(dome)
+        # Terminal A: an observatory dome, or — for a satellite-to-satellite crosslink — a
+        # second platform icon. Its screen position here stays the schematic's fixed reference
+        # point (this diagram is explicitly not to scale); its real, orbiting position already
+        # drives every physical and tracking computation.
+        a_is_sat = world.ground.space
+        if a_is_sat:
+            self._glow(p, station, 14, QColor(200, 220, 255), 150)
+            draw_platform(p, "satellite", station.x(), station.y(), 28, 0.0, QColor("#E8E4F5"))
+        else:
+            p.setPen(Qt.PenStyle.NoPen)
+            p.setBrush(QColor("#E8E4F5"))
+            p.drawRect(QRectF(station.x() - 12, station.y() - 6, 24, 8))
+            dome = QPainterPath()
+            dome.moveTo(station.x() - 12, station.y() - 6)
+            dome.arcTo(QRectF(station.x() - 12, station.y() - 18, 24, 24), 180, -180)
+            dome.closeSubpath()
+            p.drawPath(dome)
         on = world.beacon.modulation(t) > 0.5
         self._glow(p, sat, 22 if on else 12, QColor(255, 236, 170), 220 if on else 90)
         draw_platform(p, remote.info.platform, sat.x(), sat.y(), 34, 0.0, QColor("#F2EEFF"))
@@ -662,8 +681,13 @@ class WorldView(QWidget):
         alt_km = (math.sqrt(tpos[0] ** 2 + (tpos[1] + RE) ** 2 + tpos[2] ** 2) - RE) / 1000
         self._label(p, sat + QPointF(24, -30), f"{remote.platform.name} · {remote.info.name}",
                     f"{alt_km:,.0f} km alt · {rng_m / 1000:,.0f} km range · {rate:.2f} °/s")
-        self._label(p, station + QPointF(-150, -58), "Terminal A · ground station",
-                    f"el {math.degrees(el):.1f}° · az {math.degrees(az) % 360:.1f}°")
+        if a_is_sat:
+            a_alt_km = (math.sqrt(cam[0] ** 2 + (cam[1] + RE) ** 2 + cam[2] ** 2) - RE) / 1000
+            self._label(p, station + QPointF(-150, -58), "Terminal A · satellite crosslink",
+                        f"{a_alt_km:,.0f} km alt · {rng_m / 1000:,.0f} km range")
+        else:
+            self._label(p, station + QPointF(-150, -58), "Terminal A · ground station",
+                        f"el {math.degrees(el):.1f}° · az {math.degrees(az) % 360:.1f}°")
         prog = remote.orbit_phase(t)
         if key != "geo_relay":
             bar = QRectF(16, H - 44, min(260, sky_w * 0.45), 8)

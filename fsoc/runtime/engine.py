@@ -22,6 +22,7 @@ from ..core.controller import GimbalController
 from ..core.geometry import CameraIntrinsics
 from ..core.pipeline import PipelineOutput, TrackingPipeline
 from ..io.gimbal import SimulatedGimbal
+from ..io.sources import VideoFileSource
 from ..sim.patterns import INFO_BY_KEY
 from ..sim.renderer import SensorRenderer, Truth
 from ..sim.terminals import PLATFORM_BY_KEY
@@ -138,6 +139,9 @@ class Engine:
         self.run_id = 0
         self.ui_revision = 0          # bumped when the engine changes settings the UI shows
         self.frame_listeners: List[Callable[[Snapshot], None]] = []
+        self.video_source: Optional[VideoFileSource] = None
+        self._video_path: Optional[str] = None
+        self.video_error: Optional[str] = None
         self.gimbal.reset(*self._park_pose(0.0))
 
     # ================================================================ lifecycle
@@ -168,9 +172,10 @@ class Engine:
             fn()
 
     def _park_pose(self, t: float) -> Tuple[float, float]:
-        """Cold-start pointing. Spacecraft: open-loop pre-point to the ephemeris-predicted
-        position (as operational ground stations do before a pass). Otherwise: stow at 0/0."""
-        if self.world.remote.space:
+        """Cold-start pointing. Spacecraft (either end): open-loop pre-point to the
+        ephemeris-predicted position (as operational ground stations — or satellites tracking
+        a crosslink partner — do before a pass). Otherwise: stow at 0/0."""
+        if self.world.space_scene:
             c = self.world.cue(t)
             return c.az, c.el
         return 0.0, 0.0
@@ -269,10 +274,26 @@ class Engine:
     def set_ground(self, mount: Optional[str] = None, x: Optional[float] = None, z: Optional[float] = None,
                    height: Optional[float] = None) -> None:
         def do():
-            t, g = self.clock.now(), self.world.ground
+            t, w, g = self.clock.now(), self.world, self.world.ground
+            was_space = w.space_scene
             if mount is not None:
                 g.set_mount(t, mount)
             g.set_position(t, x, z, height)
+            now_space = w.space_scene
+            if was_space != now_space:
+                # Terminal A itself moved between ground and orbit: a different sky (and, for a
+                # satellite, a different pre-pointing strategy), so acquisition starts afresh.
+                w.time_of_day = "night" if now_space else "day"
+                self.ui_revision += 1
+                self._restart_tracking(t, park=True)
+        self._post(do)
+
+    def set_ground_orbit(self, alt_km: Optional[float] = None, incl: Optional[float] = None,
+                         heading: Optional[float] = None) -> None:
+        def do():
+            self.world.ground.set_orbit(alt_km, incl, heading)
+            if self.world.ground.space:
+                self._restart_tracking(self.clock.now(), park=True)
         self._post(do)
 
     # ------------------------------------------------------------------ beacon
@@ -288,6 +309,45 @@ class Engine:
 
     def reset_identity(self) -> None:
         self._post(self.pipeline.reset_identity)
+
+    # -------------------------------------------------------------------- video
+    def load_video(self, path: str, hfov_deg: float = 4.0) -> None:
+        """Switch to a recorded video: the exact same TrackingPipeline and GimbalController run
+        on real frames instead of the simulator. No ground truth exists for a real recording, so
+        the SIH scoring that depends on it (tracking error, target loss, re-acquisition) reports
+        "—"; acquisition, processing speed and camera update rate are still measured live."""
+        def do():
+            try:
+                src = VideoFileSource(path, hfov_deg=hfov_deg)
+            except Exception as ex:
+                self.video_error = str(ex)
+                return
+            if self.video_source is not None:
+                self.video_source.close()
+            self.video_source = src
+            self._video_path = path
+            self.video_error = None
+            self.pipeline.cfg.require_cue = False   # no telemetry cue for a recorded video
+            self.pipeline.clear_cue()
+            self._restart_tracking(self.clock.now())
+            self.ui_revision += 1
+        self._post(do)
+
+    def use_simulation(self) -> None:
+        def do():
+            if self.video_source is not None:
+                self.video_source.close()
+            self.video_source = None
+            self._video_path = None
+            self.video_error = None
+            self.pipeline.cfg.require_cue = True
+            self._restart_tracking(self.clock.now(), park=True)
+            self.ui_revision += 1
+        self._post(do)
+
+    @property
+    def is_video(self) -> bool:
+        return self.video_source is not None
 
     # ------------------------------------------------------------------ misc
     def set_hazard(self, key: str, enabled: Optional[bool] = None, intensity: Optional[float] = None) -> None:
@@ -311,6 +371,7 @@ class Engine:
                     bearing=r.bearing.target(), altitude=r.alt_off.target(), variation=r.variation.target(),
                     orbit_alt=r.orbit_alt, max_el=r.max_el, heading=r.heading, mount=g.mount,
                     ground_x=g.x.target(), ground_z=g.z.target(), ground_h=g.height.target(),
+                    ground_orbit_alt=g.sat_alt_km, ground_incl=g.sat_incl, ground_heading=g.sat_heading,
                     beacon_freq=b.freq_hz, beacon_brightness=b.brightness, beacon_depth=b.depth,
                     max_slew=math.degrees(self.controller.max_rate), time_of_day=self.world.time_of_day)
 
@@ -359,6 +420,9 @@ class Engine:
         self.gimbal.command_rate(t, caz, cel)
 
     def _vision_tick(self, t: float) -> None:
+        if self.video_source is not None:
+            self._vision_tick_video(t)
+            return
         w = self.world
         c0 = time.perf_counter()
         self.pipeline.set_cue(w.cue(t))
@@ -371,6 +435,28 @@ class Engine:
         stage = (render_ms, out.detect_ms, out.track_ms)
         self.recorder.add(out, truth, ev, stage)
         self._publish(t, frame.image, out, truth, stage)
+
+    def _vision_tick_video(self, t: float) -> None:
+        c0 = time.perf_counter()
+        src = self.video_source
+        frame = src.read() if src is not None else None
+        if frame is None and self._video_path is not None:
+            src.close()
+            self.video_source = VideoFileSource(self._video_path, hfov_deg=self.K.hfov_deg)
+            frame = self.video_source.read()
+        if frame is None:
+            return
+        out = self.pipeline.process_frame(frame)
+        render_ms = (time.perf_counter() - c0) * 1000.0
+        # No ground truth exists for a real recording; the pipeline and GUI already treat a
+        # None target_px / cam_az,el-only Truth as "unknown", which is exactly what this is.
+        truth = Truth(t=frame.t, target_px=None, in_fov=False, occluded=False, occlusion_kind="",
+                      target_los=(0.0, 0.0), range_m=0.0, cam_az=frame.gimbal_az, cam_el=frame.gimbal_el,
+                      beacon_peak_dn=0.0, beacon_on=True)
+        stage = (render_ms, out.detect_ms, out.track_ms)
+        self.evaluator.on_frame(out, truth, render_ms, out.detect_ms, out.track_ms, has_truth=False)
+        self.recorder.add(out, truth, self.evaluator, stage)
+        self._publish(frame.t, frame.image, out, truth, stage)
 
     def rates(self) -> Dict[str, float]:
         if self.headless:
@@ -418,14 +504,19 @@ class Engine:
 
     # ================================================================ headless
     def run_headless(self, duration_s: float, events: Dict[float, Callable[["Engine"], None]] = None,
-                     on_frame: Optional[Callable[[Snapshot], None]] = None) -> dict:
+                     on_frame: Optional[Callable[[Snapshot], None]] = None,
+                     should_stop: Optional[Callable[[], bool]] = None) -> dict:
         self.headless = True
         self._run_commands()
         events = dict(events or {})
         steps = int(duration_s * self.CONTROL_HZ)
         ratio = int(round(self.CONTROL_HZ / self.VISION_HZ))
         wall0 = time.perf_counter()
+        stopped = False
         for k in range(steps + 1):
+            if should_stop is not None and should_stop():
+                stopped = True
+                break
             t = k / self.CONTROL_HZ
             for et in [e for e in events if e <= t]:
                 events.pop(et)(self)
@@ -440,6 +531,7 @@ class Engine:
         m = self.evaluator.metrics(rates["vision"], rates["control"], None)
         summary = self.evaluator.summary()
         summary["wall_time_s"] = round(wall, 2)
+        summary["stopped"] = stopped
         sig = self.pipeline.identifier.sig
         summary["identity_learned"] = sig.learned
         summary["identity_freq_hz"] = round(sig.freq_hz, 2)

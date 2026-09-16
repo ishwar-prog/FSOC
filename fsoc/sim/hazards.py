@@ -117,7 +117,7 @@ class HazardField:
 
     def vibration(self, t: float) -> Tuple[float, float, float, float]:
         """(d_az, d_el, rate_az, rate_el) of the camera LOS due to mount vibration (rad)."""
-        A = 0.11 * DEG * self._level["vibration"]
+        A = 0.085 * DEG * self._level["vibration"]
         if A <= 0:
             return 0.0, 0.0, 0.0, 0.0
         out = []

@@ -3,8 +3,8 @@
 import random
 
 from PySide6.QtCore import QEasingCurve, QPropertyAnimation, Qt, Signal
-from PySide6.QtWidgets import (QButtonGroup, QFrame, QGridLayout, QHBoxLayout, QPushButton, QScrollArea, QSlider,
-                               QStackedWidget, QVBoxLayout, QWidget)
+from PySide6.QtWidgets import (QButtonGroup, QFileDialog, QFrame, QGridLayout, QHBoxLayout, QPushButton,
+                               QScrollArea, QSlider, QStackedWidget, QVBoxLayout, QWidget)
 
 from fsoc.sim.hazards import HAZARD_INFOS
 from fsoc.sim.patterns import PATTERN_INFOS
@@ -280,6 +280,39 @@ class ControlRail(QWidget):
             self.controls_box.addWidget(w)
         self.sliders = s
 
+    def _rebuild_ground_position(self, mount: str) -> None:
+        while self.pos_box.count():
+            w = self.pos_box.takeAt(0).widget()
+            if w:
+                w.deleteLater()
+        st = self.engine.remote_state()
+        e = self.engine
+        g = {}
+        if mount == "satellite":
+            g["alt"] = ValueSlider("Orbit altitude", 350, 1500, st["ground_orbit_alt"], 10,
+                                   lambda v: f"{v:.0f} km", tip("orbit_alt"))
+            g["alt"].slider.sliderReleased.connect(lambda: e.set_ground_orbit(alt_km=g["alt"].value()))
+            g["incl"] = ValueSlider("Inclination", 0, 98, st["ground_incl"], 1, lambda v: f"{v:.0f}°", tip("incl"))
+            g["incl"].slider.sliderReleased.connect(lambda: e.set_ground_orbit(incl=g["incl"].value()))
+            g["heading"] = ValueSlider("Orbital heading", 0, 355, st["ground_heading"], 5,
+                                       lambda v: f"{v:.0f}°", tip("heading"))
+            g["heading"].slider.sliderReleased.connect(lambda: e.set_ground_orbit(heading=g["heading"].value()))
+            self.pos_hint.setText("Your own terminal is now in orbit too — a satellite-to-satellite crosslink. "
+                                  "Pick a satellite or space-station pattern for Remote B to complete the pair.")
+        else:
+            g["east"] = ValueSlider("East offset", -1500, 1500, st["ground_x"], 10, lambda v: f"{v:+.0f} m",
+                                    tip("east"))
+            g["east"].changed.connect(lambda v: e.set_ground(x=v))
+            g["north"] = ValueSlider("North offset", -1000, 1500, st["ground_z"], 10, lambda v: f"{v:+.0f} m",
+                                     tip("north"))
+            g["north"].changed.connect(lambda v: e.set_ground(z=v))
+            g["height"] = ValueSlider("Mast height", 2, 30, st["ground_h"], 0.5, lambda v: f"{v:.1f} m", tip("height"))
+            g["height"].changed.connect(lambda v: e.set_ground(height=v))
+            self.pos_hint.setText("Tip: drag Terminal A in the world view to move your station.")
+        for w in g.values():
+            self.pos_box.addWidget(w)
+        self.ground_sliders = g
+
     # ================================================================== ground
     def _ground_page(self) -> QWidget:
         inner = QWidget()
@@ -303,17 +336,13 @@ class ControlRail(QWidget):
         mc.body.addLayout(row)
         col.addWidget(mc)
 
-        pc = Card("Position", info=tip("position"))
-        self.g_east = ValueSlider("East offset", -1500, 1500, st["ground_x"], 10, lambda v: f"{v:+.0f} m", tip("east"))
-        self.g_north = ValueSlider("North offset", -1000, 1500, st["ground_z"], 10, lambda v: f"{v:+.0f} m", tip("north"))
-        self.g_height = ValueSlider("Mast height", 2, 30, st["ground_h"], 0.5, lambda v: f"{v:.1f} m", tip("height"))
-        self.g_east.changed.connect(lambda v: self.engine.set_ground(x=v))
-        self.g_north.changed.connect(lambda v: self.engine.set_ground(z=v))
-        self.g_height.changed.connect(lambda v: self.engine.set_ground(height=v))
-        for w in (self.g_east, self.g_north, self.g_height):
-            pc.body.addWidget(w)
-        pc.body.addWidget(label("Tip: drag Terminal A in the world view to move your station.", "faint", wrap=True))
-        col.addWidget(pc)
+        self.pos_card = Card("Position", info=tip("position"))
+        self.pos_box = QVBoxLayout()
+        self.pos_card.body.addLayout(self.pos_box)
+        self.pos_hint = label("", "faint", wrap=True)
+        self.pos_card.body.addWidget(self.pos_hint)
+        self._rebuild_ground_position(st["mount"])
+        col.addWidget(self.pos_card)
 
         gc = Card("Gimbal", info=tip("gimbal"))
         self.g_slew = ValueSlider("Maximum turn speed", 5, 60, st["max_slew"], 1, lambda v: f"{v:.0f} °/s", tip("slew"))
@@ -329,6 +358,23 @@ class ControlRail(QWidget):
         col = QVBoxLayout(inner)
         col.setContentsMargins(0, 0, 6, 0)
         col.setSpacing(12)
+
+        ic = Card("Input source", "The exact same tracking pipeline — simulator or a real recording",
+                  info=tip("input_source"))
+        row = QHBoxLayout()
+        row.setSpacing(8)
+        self.video_btn = QPushButton("Load video…")
+        self.video_btn.clicked.connect(self._pick_video)
+        self.sim_btn = QPushButton("Back to simulation")
+        self.sim_btn.setObjectName("ghost")
+        self.sim_btn.clicked.connect(self.engine.use_simulation)
+        row.addWidget(self.video_btn)
+        row.addWidget(self.sim_btn)
+        ic.body.addLayout(row)
+        self.video_status = label("Simulation running.", "faint", wrap=True)
+        ic.body.addWidget(self.video_status)
+        col.addWidget(ic)
+
         tc = Card("Time of day", info=tip("tod"))
         self.tod = Segmented([("day", "Day"), ("dusk", "Dusk"), ("night", "Night")])
         self.tod.changed.connect(self.engine.set_time_of_day)
@@ -357,6 +403,24 @@ class ControlRail(QWidget):
         for row in self.rows.values():
             row.set_checked(False)
 
+    def _pick_video(self) -> None:
+        path, _ = QFileDialog.getOpenFileName(self, "Load a recorded video",
+                                              filter="Video files (*.mp4 *.avi *.mov *.mkv);;All files (*)")
+        if path:
+            self.engine.load_video(path)
+
+    def _refresh_video_status(self) -> None:
+        e = self.engine
+        if e.video_error:
+            self.video_status.setText(f"Could not open that file: {e.video_error}")
+        elif e.is_video:
+            import os
+            self.video_status.setText(f"Tracking “{os.path.basename(e._video_path)}” — loops when it ends. "
+                                      "No ground truth exists for a recording, so tracking error, target loss "
+                                      "and re-acquisition read “—”.")
+        else:
+            self.video_status.setText("Simulation running.")
+
     # ==================================================================== sync
     def sync(self, force: bool = False) -> None:
         """Reflect engine-side changes (e.g. drag switched to Manual, space switched to night)."""
@@ -369,4 +433,6 @@ class ControlRail(QWidget):
         self._rebuild_patterns(plat, st["pattern"])
         self._rebuild_controls(plat)
         self.mount_tiles[st["mount"]].setChecked(True)
+        self._rebuild_ground_position(st["mount"])
         self.tod.set_current(st["time_of_day"])
+        self._refresh_video_status()

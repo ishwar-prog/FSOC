@@ -186,6 +186,12 @@ class TrackingPipeline:
         with self._lock:
             self._cue = cue
 
+    def clear_cue(self) -> None:
+        """No external pointing cue exists — e.g. a recorded video has no live GPS/ephemeris
+        feed. Search starts from bore-sight instead of a cue cone."""
+        with self._lock:
+            self._cue = None
+
     def _set_state(self, s: str, t: float) -> None:
         if s != self.state:
             self.state = s
@@ -325,7 +331,11 @@ class TrackingPipeline:
         gate = cfg.gate_locked if self.state == TrackState.LOCKED else cfg.gate_coast
         locked = self.state == TrackState.LOCKED
         space = self._space_cue()
-        cap = None if locked else (0.06 if space else cfg.coast_gate_sigma_deg) * DEG
+        # Locked still gets a generous cap (not the tight coasting one): real manoeuvres and
+        # fast passes need room, but the gate must not grow without bound — a run of missed
+        # detections under vibration must not let the filter confirm a match many degrees from
+        # where it last looked and treat the jump as evidence of a genuine manoeuvre.
+        cap = (1.5 * DEG) if locked else (0.06 if space else cfg.coast_gate_sigma_deg) * DEG
         tol = self._flux_tol(locked)
         idf = self.identifier
         ltr = idf.by_id.get(self._lock_tid) if self._lock_tid is not None else None

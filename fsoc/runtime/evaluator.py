@@ -72,7 +72,12 @@ class Evaluator:
         self.last_track_sep_px: Optional[float] = None
         self.frames = 0
 
-    def on_frame(self, out, truth, render_ms: float, detect_ms: float, track_ms: float) -> None:
+    def on_frame(self, out, truth, render_ms: float, detect_ms: float, track_ms: float,
+                has_truth: bool = True) -> None:
+        """`has_truth=False` (a real recorded video, where nothing is known about the true beacon
+        position) still measures acquisition, processing speed and camera update rate — the
+        ground-truth-dependent numbers (tracking error, target loss, re-acquisition) are left
+        alone so they stay "no data" rather than being scored against a meaningless reference."""
         t = out.t
         if t < self.t0:
             return
@@ -85,6 +90,9 @@ class Evaluator:
 
         if self.acq_time is None and st == TrackState.LOCKED:
             self.acq_time = t - self.t0
+
+        if not has_truth:
+            return
 
         self.last_centroid_err = None
         if st == TrackState.LOCKED and out.measurement and truth.target_px and not truth.occluded:
