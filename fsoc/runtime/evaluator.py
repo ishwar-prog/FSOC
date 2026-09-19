@@ -43,8 +43,9 @@ class Evaluator:
     CONTROL_MIN = 20.0
     VALID_LOCK_PX = 40.0
 
-    def __init__(self, K: CameraIntrinsics) -> None:
+    def __init__(self, K: CameraIntrinsics, has_truth: bool = True) -> None:
         self.K = K
+        self.has_truth = has_truth
         self.reset(0.0)
 
     def reset(self, t0: float) -> None:
@@ -74,10 +75,20 @@ class Evaluator:
 
     def on_frame(self, out, truth, render_ms: float, detect_ms: float, track_ms: float,
                 has_truth: bool = True) -> None:
-        """`has_truth=False` (a real recorded video, where nothing is known about the true beacon
-        position) still measures acquisition, processing speed and camera update rate — the
-        ground-truth-dependent numbers (tracking error, target loss, re-acquisition) are left
-        alone so they stay "no data" rather than being scored against a meaningless reference."""
+        """Score one frame.
+
+        `has_truth=False` is a real recorded video, where the true beacon position is unknown.
+        Everything that does not need truth is still measured exactly as before — acquisition,
+        processing speed, camera update rate — and the three that normally lean on truth are
+        re-derived from what a real terminal can actually observe about itself:
+
+          * tracking error   residual between the detection and where the filter predicted it
+                             would be (the classic tracking residual; on the simulator this
+                             tracks the true error closely, so it is a fair stand-in).
+          * target loss      share of frames after first lock with no live lock — the tracker's
+                             own state, which needs no truth at all.
+          * re-acquisition   time from losing that lock to holding a confirmed one again.
+        """
         t = out.t
         if t < self.t0:
             return
@@ -92,6 +103,7 @@ class Evaluator:
             self.acq_time = t - self.t0
 
         if not has_truth:
+            self._on_frame_no_truth(out, t)
             return
 
         self.last_centroid_err = None
@@ -140,6 +152,42 @@ class Evaluator:
                 self._in_loss = False
         self._prev_valid = valid
 
+    def _on_frame_no_truth(self, out, t: float) -> None:
+        """Video scoring: measure the tracker against what it can observe, not against truth."""
+        st = out.state
+        self.last_centroid_err = None
+        if st == TrackState.LOCKED and out.measurement and out.track_px:
+            e = math.hypot(out.measurement[0] - out.track_px[0], out.measurement[1] - out.track_px[1])
+            self.err_n += 1
+            self.err_sum += e
+            self.err_sq += e * e
+            self.err_max = max(self.err_max, e)
+            self.err_recent.append(e)
+            self.last_centroid_err = e
+        if out.track_px is not None:
+            self.last_pointing_err = math.hypot(out.track_px[0] - self.K.cx, out.track_px[1] - self.K.cy)
+            if st == TrackState.LOCKED:
+                self.point_n += 1
+                self.point_sum += self.last_pointing_err
+        else:
+            self.last_pointing_err = None
+        self.last_track_sep_px = self.last_centroid_err
+
+        if self.acq_time is None:
+            return
+        valid = st in (TrackState.LOCKED, TrackState.COASTING)
+        self.frames_after_lock += 1
+        if not valid:
+            self.lost_frames += 1
+        if self._prev_valid and not valid:
+            self._in_loss = True
+            self._loss_t = t
+            self._clear_t = t                 # nothing hides the target in a recording we can see
+        if self._in_loss and valid and st == TrackState.LOCKED:
+            self.reacq_times.append(max(0.0, t - self._loss_t))
+            self._in_loss = False
+        self._prev_valid = valid
+
     # ------------------------------------------------------------------ report
     def metrics(self, vision_hz: float, control_hz: float, render_hz: Optional[float]) -> Dict[str, dict]:
         elapsed = self.t - self.t0
@@ -164,8 +212,9 @@ class Evaluator:
         if self.err_n >= 10:
             mean = self.err_sum / self.err_n
             rmse = math.sqrt(self.err_sq / self.err_n)
+            note = "" if self.has_truth else " · vs detection (video: no truth)"
             kpi("tracking_error", mean, f"{mean:.2f} px", "pass" if mean <= self.TRACK_ERR_MAX else "fail",
-                mean / self.TRACK_ERR_MAX, f"RMSE {rmse:.2f} · max {self.err_max:.1f} px")
+                mean / self.TRACK_ERR_MAX, f"RMSE {rmse:.2f} · max {self.err_max:.1f} px{note}")
         else:
             kpi("tracking_error", None, "—", "pending", 0.0, "waiting for lock")
 

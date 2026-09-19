@@ -182,6 +182,8 @@ class MainWindow(QMainWindow):
         self.cam_expand.toggled.connect(lambda on: self._expand("camera" if on else None))
         self.cam_card.header.addWidget(self.cam_expand, 0, Qt.AlignmentFlag.AlignTop)
         self.camera = CameraView(self.engine.K)
+        self.camera.seeded.connect(self.engine.seed_target)
+        self.camera.set_clickable(self.engine.is_video)
         for k, b in self.layer_btns.items():
             self.camera.set_layer(k, b.isChecked())
         self.cam_card.body.addWidget(self.camera, 1)
@@ -286,6 +288,11 @@ class MainWindow(QMainWindow):
                 self.kpis.update_metrics(s.metrics)
                 self.kpis.update_identity(s)
                 self.rail.sync()
+                # A loaded video has its own resolution: follow it, or every overlay would be
+                # drawn at the simulator sensor's scale and the lock would look nowhere near
+                # the beacon. Clicking to pick a target only means something on real footage.
+                self.camera.set_intrinsics(self.engine.K)
+                self.camera.set_clickable(self.engine.is_video)
         if self._tick % 3 == 0 and page == 1:
             self.analytics.refresh(s)
 

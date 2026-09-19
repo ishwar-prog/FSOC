@@ -19,6 +19,7 @@ The remote terminal can be a drone, an aircraft, a ship, a LEO satellite, a GEO 
 | Run the application (no Python needed) | `dist\FSOC_Beacon_Tracker.exe` |
 | Run from source | `python -m pip install -r requirements.txt` then `python main.py` |
 | Headless validation of every terminal, pattern and hazard | `python benchmark.py` (add `--duration 20` for a quick pass, `--only leo,decoys` to filter) |
+| Make realistic test footage for video mode | `python tools/make_demo_video.py` → `demo_videos\` (clips + ground-truth CSVs) |
 | Rebuild the .exe | `powershell -ExecutionPolicy Bypass -File build_exe.ps1` |
 
 Logs (per-frame CSV + JSON summary) and a saved beacon signature are written to a `logs\` folder next to the executable.
@@ -39,7 +40,7 @@ Logs (per-frame CSV + JSON summary) and a saved beacon signature are written to 
 | Watch the validation suite actually run, and stop it | The suite's card now shows a **live camera preview** of whichever case is running — which case, its elapsed time and state — updated as it goes, plus a **Stop** button that aborts immediately, even mid-case, and marks the interrupted row STOPPED rather than pass/fail. |
 | Show the camera's view angle, not a laser beam | The link between the terminals is now drawn as the camera's real field of view — a wedge that widens with range and tints to the tracker's state colour when locked — instead of a beam line, in both the ground/sea perspective and the space schematic. |
 | A second satellite, for two-satellite links | Ground A can itself be **a satellite** (`Mount → Satellite`): its own LEO orbit, altitude/inclination/heading sliders, a satellite icon and label in the world view. Pair it with a LEO/GEO/ISS pattern on Remote B for a genuine satellite-to-satellite crosslink — both ends moving, both needing to find and hold the other's beacon. |
-| Make it work on video | **Environment → Input source → Load video…** swaps the simulator for a real recorded clip; the identical detector, identifier, Kalman tracker and gimbal controller run on it unchanged. There is no ground truth for a recording, so tracking error / target loss / re-acquisition read "—"; acquisition, processing speed and camera update rate are still measured live. **Back to simulation** returns to the simulator. |
+| Make it work on video | **Environment → Input source → Load video…** swaps the simulator for a real recorded clip; the identical detector, identifier, Kalman tracker and gimbal controller run on it unchanged, and **all six mission targets are scored** (section 6). Click any light in the camera view to pick the target by hand. **Back to simulation** returns to the simulator. |
 
 ---
 
@@ -138,6 +139,66 @@ A beacon cannot be found by brightness alone: at range it can be fainter than a 
 6. **Portable.** *Save signature* writes it to JSON; a video or hardware session can load it and start already knowing its beacon. *Relearn* forgets it (for a different beacon).
 
 The **Beacon identity** card shows the learned rate/duty, the probability that the locked light is the beacon, and a bar for every light in view.
+
+## 5b. Video input — real footage, all six targets
+
+Simulation is where the system is *tuned*; a real recording is where it has to hold up. Video mode
+runs the **same** detector, identifier, Kalman tracker and controller — nothing is swapped for a
+different algorithm, and no model is trained. Load a clip from **Environment → Input source →
+Load video…**.
+
+**What real footage needed that simulation did not**
+
+| Problem on real video | Fix |
+|---|---|
+| The whole vision chain kept the simulator's 640×480 intrinsics while frames were 1280×720, so every pixel↔angle conversion, ROI and on-screen overlay was at the wrong scale — the lock brackets were drawn far from the beacon and it looked like nothing was tracked. | The pipeline, evaluator and camera view are rebuilt around the video's own intrinsics on load, and every overlay is scaled to the actual frame. |
+| An uncalibrated clip gives no way to know its true field of view, and several gates are specified in degrees. | Default to the angular scale those gates were tuned at (160 px/°), overridable when the real optics are known. |
+| No telemetry cue exists, so selection falls back toward "brightest wins" — and a target that does not blink cannot be told from a street lamp by its signature. | Sources are also scored on **how differently they move from the rest of the field** — a terminal drifting across fixed lights, or a fixed one against drifting stars. Only used when there is no cue, so simulator behaviour is untouched. |
+| Some targets are genuinely ambiguous: a steady beacon beside a blinking decoy is, to any automatic rule, the *less* beacon-like of the two. | **Click the target in the camera view.** The seed waits for a solid detection (an operator often clicks while a keyed beacon is dark), follows the target while it waits, and then owns the lock — identity evidence alone cannot hand it to a look-alike. |
+
+**Measured, against known truth.** `tools/make_demo_video.py` renders realistic clips — 1280×720
+H.264, wide field of view, textured day/night scenes, handheld shake, auto-exposure drift, lens
+flare, birds, street lights and a rival blinker — each with a `_truth.csv` of the real beacon
+position, so the tracker can be scored honestly rather than eyeballed.
+
+| Clip | Acquisition | Tracking error | Target loss | Re-acq | On target vs truth |
+|---|---|---|---|---|---|
+| Day · drone, 5 Hz beacon | 0.79 s | 0.93 px | 0.00 % | — | 100.0 % |
+| Day · sun glare + lens flare | 0.80 s | 1.06 px | 0.00 % | — | 100.0 % |
+| Night · city lights + rival blinker | 0.76 s | 0.96 px | 0.00 % | — | 100.0 % |
+| Steady (non-blinking) beacon ¹ | 0.76 s | 1.15 px | 0.30 % | 0.03 s | 97.3 % |
+| Tiny, far, 8 Hz beacon | 0.76 s | 1.12 px | 0.00 % | — | 100.0 % |
+
+Targets: acquisition ≤ 2 s · tracking error ≤ 10 px · target loss < 5 % · re-acquisition ≤ 1 s ·
+≥ 20 FPS · ≥ 30/20 Hz. Every clip meets all six.
+
+¹ Click-seeded: a steady target next to a blinking decoy is ambiguous by design, since the whole
+premise of automatic identification is that beacons are keyed. One click resolves it.
+
+*"On target vs truth" is the share of frames where the track sits within 40 px of the true beacon
+position from the sidecar file — an independent check, not one of the six targets.*
+
+**How the six targets are scored without ground truth.** A real recording has no known beacon
+position, so three of them are re-derived from what a real terminal can observe about itself, and
+the UI says so:
+
+- **Tracking error** — residual between the detection and where the filter predicted it would be.
+  This is the classical tracking residual a real system reports; on the simulator it tracks the
+  true error closely, so it is a fair stand-in.
+- **Target loss** — share of frames after first lock with no live lock. The tracker's own state;
+  needs no truth at all.
+- **Re-acquisition** — time from losing that lock to holding a confirmed one again.
+- Acquisition, processing speed and camera update rate are measured exactly as in simulation.
+
+**Why not YOLO.** A beacon is not a semantic object class — it is a photometric and temporal
+phenomenon, a few pixels across, defined by *how it blinks and moves*. A COCO-trained detector has
+no "beacon" class, and training one would need labelled footage that does not exist here, while
+adding a deep-learning runtime to a 107 MB executable. Motion segmentation (MOG2) was implemented
+and measured: it made things **worse** (57–77 % loss on the day clip), because it offers spurious
+movers exactly during the beacon's dark half. It is kept in `fsoc/core/video.py`, off by default,
+for footage where the target is genuinely not a bright source.
+
+---
 
 ## 6. Hazards (8, freely combinable, intensity 0–100 %, fade in smoothly)
 

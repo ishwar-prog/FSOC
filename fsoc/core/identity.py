@@ -76,7 +76,7 @@ class Features:
 
 class Tracklet:
     __slots__ = ("id", "az", "el", "vaz", "vel", "t", "born", "last_det", "hits", "samples",
-                 "det_az", "det_el", "det_t", "feat", "llr", "p", "outside", "px")
+                 "det_az", "det_el", "det_t", "feat", "llr", "p", "outside", "px", "distinct")
 
     def __init__(self, tid: int, t: float, az: float, el: float) -> None:
         self.id = tid
@@ -91,6 +91,7 @@ class Tracklet:
         self.p = 0.0
         self.outside = 0
         self.px = None
+        self.distinct = 0.0          # how differently this light moves from the rest of the field
 
     @property
     def age(self) -> float:
@@ -239,6 +240,7 @@ class BeaconIdentifier:
         if self._frame % 2 == 0:
             self._compute_features()
         self._score()
+        self._score_motion()
         return assigned
 
     # ---------------------------------------------------------------- features
@@ -334,6 +336,34 @@ class BeaconIdentifier:
                 tr.llr, tr.p = 0.0, 0.0
                 continue
             tr.llr, tr.p = self._posterior(self._beacon_ll(f), f)
+
+    def _score_motion(self) -> None:
+        """How differently does each light move from everything else in view?
+
+        Not every beacon blinks. When the modulation test has nothing to say, the remaining
+        honest discriminator is behaviour: a terminal on a moving platform drifts across a field
+        of lights that are fixed to the world (street lights, windows), while a geostationary
+        one sits still against stars that all drift together. Either way the target is the
+        source whose motion disagrees with the consensus, so this measures exactly that — in
+        pixels per second, against the median of the field, which is also the camera's own shake.
+        """
+        trs = [tr for tr in self.tracklets if tr.hits >= 4]
+        if len(trs) < 3:
+            for tr in self.tracklets:
+                tr.distinct = 0.0
+            return
+        vx = np.fromiter((tr.vaz * math.cos(tr.el) for tr in trs), float, len(trs))
+        vy = np.fromiter((tr.vel for tr in trs), float, len(trs))
+        mx, my = float(np.median(vx)), float(np.median(vy))
+        spread = float(np.median(np.hypot(vx - mx, vy - my))) + 1e-9
+        for tr in self.tracklets:
+            if tr.hits < 4:
+                tr.distinct = 0.0
+                continue
+            d = math.hypot(tr.vaz * math.cos(tr.el) - mx, tr.vel - my)
+            # Relative to the field's own scatter, but with an absolute floor so that a frame
+            # full of perfectly static lights cannot make trivial jitter look significant.
+            tr.distinct = min(1.0, d / max(3.0 * spread, 1.5e-4))
 
     # ---------------------------------------------------------------- learning
     def learn(self, locked: Optional[Tracklet], dt: float) -> None:

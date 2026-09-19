@@ -108,7 +108,7 @@ class _Steer:
 
 class _Hypothesis:
     __slots__ = ("kf", "hits", "misses", "prior", "snr_sum", "flux", "born", "last_px",
-                 "lf_mean", "lf_var", "cue", "tid", "last_t", "pgood_t")
+                 "lf_mean", "lf_var", "cue", "tid", "last_t", "pgood_t", "seeded")
 
     def __init__(self, kf: LosKalmanTracker, prior: float, snr: float, flux: float, t: float) -> None:
         self.kf = kf
@@ -125,6 +125,7 @@ class _Hypothesis:
         self.cue = False
         self.tid = None
         self.pgood_t = None                  # since when its light has looked beacon-like
+        self.seeded = False                  # operator pointed at this one
 
     def add_flux(self, flux: float) -> None:
         lf = math.log(max(flux, 1e-3))
@@ -135,6 +136,11 @@ class _Hypothesis:
 
 
 class TrackingPipeline:
+    SEED_TTL_S = 6.0                   # how long an operator's "track that one" stays in force
+    SEED_RADIUS_PX = 70.0              # how close a detection must be to the point they clicked
+    SEED_DRIFT_PX_S = 45.0             # ...widened per second, since the target keeps moving
+    SEED_MIN_SNR = 15.0                # and it must be a real detection, not noise at that spot
+
     def __init__(self, K: CameraIntrinsics, config: PipelineConfig = None,
                  detector: BeaconDetector = None, latency_s: float = 0.02) -> None:
         self.K = K
@@ -176,6 +182,9 @@ class TrackingPipeline:
             self._last_frame_t = None
             self._assign = []
             self._bad_lock_s = 0.0
+            self._seed = None
+            self._seed_t = None
+            self._lock_seeded = False
             self.identifier.reset(keep_signature=True)
 
     def reset_identity(self) -> None:
@@ -191,6 +200,30 @@ class TrackingPipeline:
         feed. Search starts from bore-sight instead of a cue cone."""
         with self._lock:
             self._cue = None
+
+    def seed_target(self, px: float, py: float) -> None:
+        """Operator pointed at the target in the camera image: "track that one".
+
+        This is the manual equivalent of a cue — it does not bypass the detector or the
+        identifier, it just says where to look. The nearest detection to the seed is preferred
+        while acquiring, and once the lock is established the learned signature takes over, so a
+        seed on a real recording ends up exactly where an automatic lock would have.
+        """
+        with self._lock:
+            self._seed = (px, py)
+            self._seed_t = None                  # stamped on the next frame we see
+            self._lock_seeded = False
+            self._hyps = []
+            self._lock_tid = None
+            self._clutter = []
+            self.tracker.reset()
+            self._mode = TrackState.SEARCH
+            self._set_state(TrackState.SEARCH, self._last_frame_t or 0.0)
+
+    def _seed_px_dist(self, c: Candidate) -> Optional[float]:
+        if self._seed is None:
+            return None
+        return math.hypot(c.x - self._seed[0], c.y - self._seed[1])
 
     def _set_state(self, s: str, t: float) -> None:
         if s != self.state:
@@ -293,6 +326,11 @@ class TrackingPipeline:
         (typical: a star a few arc-minutes from a GEO relay won the geometric race at lock)."""
         idf = self.identifier
         ltr = idf.by_id.get(self._lock_tid) if self._lock_tid is not None else None
+        if self._lock_seeded:
+            # The operator pointed at this one. A steady target scores low on "looks keyed", so
+            # identity evidence alone must not be allowed to hand the lock to a blinking decoy.
+            self._bad_lock_s = 0.0
+            return None
         if not idf.enabled or ltr is None or ltr.feat is None or ltr.feat.span_s < 1.2 or ltr.p >= 0.2:
             self._bad_lock_s = 0.0
             return None
@@ -357,7 +395,8 @@ class TrackingPipeline:
                 # (under vibration the old tracklet may have grabbed a noise blip this frame, so its
                 # own detection state is not required — the 3σ gate below still applies)
                 young = (tr.age < 0.35 and tr.hits <= 10) or tr.feat is None
-                strong = tr.feat is not None and tr.p >= 0.7 and (ltr.feat is None or ltr.p < 0.3)
+                strong = (not self._lock_seeded and tr.feat is not None and tr.p >= 0.7
+                          and (ltr.feat is None or ltr.p < 0.3))
                 if not (young or strong):
                     continue
                 fragment = young and not strong
@@ -494,13 +533,47 @@ class TrackingPipeline:
                 self._search_s = 0.0
                 self._search_dwell = 0.0
         self._clutter = [cl for cl in self._clutter if t - cl[0] < 6.0]
-        allow_spawn = reacq or self._search_started or (self._cue is None and not cfg.require_cue)
+        # An operator seed ("track that one") is a pointing hint with a lifetime: it steers
+        # acquisition to the light that was pointed at, then hands over to the normal identity
+        # and association logic once a lock exists.
+        seeded_now, seed_pick = False, None
+        if self._seed is not None:
+            if self._seed_t is None:
+                self._seed_t = t
+            if t - self._seed_t > self.SEED_TTL_S:
+                self._seed = self._seed_t = None
+            else:
+                seeded_now = True
+                # Once a seeded hypothesis exists it is already being tracked frame to frame, so
+                # let it mature and confirm normally. Only while there is none does the seed hunt
+                # for its target: an operator can easily click while a keyed beacon is in its
+                # dark half, so it waits for a solid detection rather than grabbing whatever
+                # noise sits at that point, widening its reach as the target moves meanwhile.
+                if not any(h.seeded for h in self._hyps):
+                    radius = self.SEED_RADIUS_PX + self.SEED_DRIFT_PX_S * (t - self._seed_t)
+                    best_snr, best_i = None, None
+                    for i, (c, az, el, r) in enumerate(los):
+                        if i in used or c.snr < max(cfg.min_snr_new, self.SEED_MIN_SNR):
+                            continue
+                        d = self._seed_px_dist(c)
+                        if d is None or d > radius:
+                            continue
+                        if best_snr is None or c.snr > best_snr:
+                            best_snr, best_i = c.snr, i
+                    seed_pick = best_i
+                    if seed_pick is None:
+                        self._set_state(TrackState.SEARCH, t)
+                        return None              # nothing convincing there yet — keep waiting
+        allow_spawn = reacq or self._search_started or seeded_now \
+            or (self._cue is None and not cfg.require_cue)
         for i, (c, az, el, r) in enumerate(los):
             if (not allow_spawn or i in used or c.snr < cfg.min_snr_new
                     or len(self._hyps) >= cfg.max_hypotheses):
                 continue
-            if self._is_known_clutter(i):
+            if self._is_known_clutter(i) and not seeded_now:
                 continue
+            if seeded_now and (seed_pick is None or i != seed_pick):
+                continue                         # only the light the operator pointed at
             cue_based = False
             if reacq:
                 if self._flux_avg > 0 and \
@@ -518,6 +591,8 @@ class TrackingPipeline:
                     cue_based = True
                 else:
                     continue
+            elif seeded_now:
+                prior, vaz, vel = 0.0, 0.0, 0.0
             else:
                 prior, vaz, vel = self._cue_prior(t, az, el)
                 if prior < -0.5 * 2.5 ** 2:
@@ -529,6 +604,7 @@ class TrackingPipeline:
                           vel_sigma=(0.25 if (reacq and not cue_based) else 2.5) * DEG)
             h = _Hypothesis(kf, prior, c.snr, c.flux, t)
             h.cue = cue_based
+            h.seeded = seeded_now and not reacq
             h.last_px = c
             tr = self._assign[i] if i < len(self._assign) else None
             h.tid = tr.id if tr is not None else None
@@ -542,6 +618,8 @@ class TrackingPipeline:
             need = cfg.confirm_hits_reacq if hreacq else cfg.confirm_hits_search
             if hreacq and self._space_cue():
                 need = 6                      # dense star field near the prediction: a little more proof
+            elif top.seeded:
+                need = 2                      # pointed at by hand: confirm as soon as it is consistent
             margin_ok = len(scored) == 1 or top_score - scored[1][0] > 1.0 or top.hits >= need + 4
             plausible = self._plausible(top, t, hreacq)
             if not plausible and top.hits >= need + 6:
@@ -562,6 +640,9 @@ class TrackingPipeline:
                 self._gap_max = 0.07
                 self._hyps = []
                 self._mode = TrackState.SEARCH
+                if top.seeded:
+                    self._lock_seeded = True          # operator's pick owns this lock
+                self._seed = self._seed_t = None      # seed consumed; association takes over now
                 self._set_state(TrackState.LOCKED, t)
                 return top.last_px
             if top.misses == 0:
@@ -601,8 +682,8 @@ class TrackingPipeline:
     def _id_ok(self, h: _Hypothesis, t: float, reacq: bool) -> bool:
         """Identity gate before a lock is declared."""
         idf = self.identifier
-        if not idf.enabled:
-            return True
+        if not idf.enabled or h.seeded:
+            return True                       # the operator already said which light this is
         tr = idf.by_id.get(h.tid)
         p = tr.p if (tr is not None and tr.feat is not None) else None
         if reacq:
@@ -654,6 +735,8 @@ class TrackingPipeline:
 
     def _score(self, h: _Hypothesis, t: float, reacq: bool) -> float:
         s = 0.01 * min(h.snr_sum, 8 * 40.0)
+        if h.seeded:
+            s += 8.0                          # an explicit operator pick outranks everything else
         e = h.kf.estimate_at(t)
         if reacq or self._cue is None:
             s += h.prior
@@ -662,6 +745,11 @@ class TrackingPipeline:
         tr = self.identifier.by_id.get(h.tid)
         if tr is not None and tr.feat is not None and self.identifier.enabled:
             s += 0.8 * tr.llr
+        if tr is not None and self._cue is None and self.identifier.enabled:
+            # No external cue to point the way (a recorded video), so behaviour has to carry more
+            # weight: prefer the light that moves unlike the rest of the field over whichever one
+            # merely happens to be brightest. With a cue present this stays off entirely.
+            s += 2.5 * tr.distinct
         if h.hits >= 3:
             s -= 3.0 * h.lf_var if tr is None or tr.feat is None else 0.0
             if reacq:

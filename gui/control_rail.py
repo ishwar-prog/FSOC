@@ -1,6 +1,8 @@
 """Left sidebar: Remote terminal · Ground terminal · Environment."""
 
+import os
 import random
+import sys
 
 from PySide6.QtCore import QEasingCurve, QPropertyAnimation, Qt, Signal
 from PySide6.QtWidgets import (QButtonGroup, QFileDialog, QFrame, QGridLayout, QHBoxLayout, QPushButton,
@@ -404,8 +406,15 @@ class ControlRail(QWidget):
             row.set_checked(False)
 
     def _pick_video(self) -> None:
-        path, _ = QFileDialog.getOpenFileName(self, "Load a recorded video",
-                                              filter="Video files (*.mp4 *.avi *.mov *.mkv);;All files (*)")
+        start = ""
+        for base in (os.path.dirname(os.path.abspath(sys.executable)) if getattr(sys, "frozen", False)
+                     else os.getcwd(),):
+            cand = os.path.join(base, "demo_videos")
+            if os.path.isdir(cand):
+                start = cand
+                break
+        path, _ = QFileDialog.getOpenFileName(self, "Load a recorded video", start,
+                                              "Video files (*.mp4 *.avi *.mov *.mkv *.webm);;All files (*)")
         if path:
             self.engine.load_video(path)
 
@@ -414,10 +423,10 @@ class ControlRail(QWidget):
         if e.video_error:
             self.video_status.setText(f"Could not open that file: {e.video_error}")
         elif e.is_video:
-            import os
             self.video_status.setText(f"Tracking “{os.path.basename(e._video_path)}” — loops when it ends. "
-                                      "No ground truth exists for a recording, so tracking error, target loss "
-                                      "and re-acquisition read “—”.")
+                                      "Click the light you want in the camera view to pick the target by hand. "
+                                      "A recording has no ground truth, so tracking error is measured against "
+                                      "the detected spot instead.")
         else:
             self.video_status.setText("Simulation running.")
 

@@ -1,10 +1,11 @@
 """Camera sensor view: the raw NIR frame the tracker sees, with clean analytical overlays."""
 
 import math
+import time
 from typing import Optional
 
 import numpy as np
-from PySide6.QtCore import QPointF, QRectF, Qt
+from PySide6.QtCore import QPointF, QRectF, Qt, Signal
 from PySide6.QtGui import QColor, QImage, QPainter, QPainterPath, QPen
 from PySide6.QtWidgets import QWidget
 
@@ -15,6 +16,11 @@ DEG = math.pi / 180.0
 
 
 class CameraView(QWidget):
+    """The sensor image with analytical overlays. Click it to tell the tracker which light to
+    follow — indispensable on real video, where there is no telemetry cue to point the way."""
+
+    seeded = Signal(float, float)          # target picked, in image pixel coordinates
+
     def __init__(self, K: CameraIntrinsics, parent=None) -> None:
         super().__init__(parent)
         self.K = K
@@ -22,9 +28,39 @@ class CameraView(QWidget):
         self._qimg: Optional[QImage] = None
         self._buf = None
         self._frame_id = -1
+        self.clickable = False
+        self._seed_px: Optional[tuple] = None
+        self._seed_t = 0.0
         self.layers = {"truth": True, "detections": True, "identity": True, "track": True, "roi": True,
                        "search": True, "zoom": True}
         self.setMinimumSize(360, 270)
+
+    def set_intrinsics(self, K: CameraIntrinsics) -> None:
+        """Follow the engine when it swaps cameras (simulator <-> a video of a different size),
+        otherwise every overlay would be drawn at the previous sensor's scale."""
+        if K is not self.K:
+            self.K = K
+            self._frame_id = -1
+            self.update()
+
+    def set_clickable(self, on: bool) -> None:
+        self.clickable = on
+        self.setCursor(Qt.CursorShape.CrossCursor if on else Qt.CursorShape.ArrowCursor)
+        self.setToolTip("Click the light you want tracked" if on else "")
+
+    def mousePressEvent(self, e) -> None:
+        if not self.clickable or self._qimg is None:
+            return
+        r = self._image_rect()
+        if not r.contains(e.position()):
+            return
+        k = self.K.width / max(r.width(), 1e-6)
+        x = (e.position().x() - r.left()) * k
+        y = (e.position().y() - r.top()) * (self.K.height / max(r.height(), 1e-6))
+        self._seed_px = (x, y)
+        self._seed_t = time.monotonic()
+        self.seeded.emit(x, y)
+        self.update()
 
     def set_layer(self, key: str, on: bool) -> None:
         self.layers[key] = on
@@ -42,10 +78,18 @@ class CameraView(QWidget):
             self._qimg = QImage(img.data, w, h, w, QImage.Format.Format_Grayscale8)
         self.update()
 
+    def _img_wh(self):
+        """Dimensions of the frame actually on screen — never assume it matches the intrinsics,
+        or a video of a different size to the simulator draws every overlay at the wrong scale."""
+        if self._buf is not None:
+            return float(self._buf.shape[1]), float(self._buf.shape[0])
+        return float(self.K.width), float(self.K.height)
+
     def _image_rect(self) -> QRectF:
         W, H = self.width(), self.height()
-        s = min(W / self.K.width, H / self.K.height)
-        w, h = self.K.width * s, self.K.height * s
+        iw, ih = self._img_wh()
+        s = min(W / iw, H / ih)
+        w, h = iw * s, ih * s
         return QRectF((W - w) / 2, (H - h) / 2, w, h)
 
     def paintEvent(self, e) -> None:
@@ -64,11 +108,13 @@ class CameraView(QWidget):
             p.drawText(r, Qt.AlignmentFlag.AlignCenter, "Waiting for sensor…")
             return
         p.drawImage(r, self._qimg)
-        k = r.width() / self.K.width
+        iw, ih = self._img_wh()
+        k = r.width() / iw
+        ky = r.height() / ih
         o = s.out
 
         def pt(u, v):
-            return QPointF(r.left() + u * k, r.top() + v * k)
+            return QPointF(r.left() + u * k, r.top() + v * ky)
 
         state = "PAUSED" if s.paused else o.state
         scol = c(STATE_COLOR.get(state, ("faint", state))[0])
@@ -129,6 +175,14 @@ class CameraView(QWidget):
             self._tag(p, q + QPointF(22, -22), txt, scol)
         elif o.track_px is None and o.state in ("SEARCH", "REACQUIRE"):
             self._offscreen(p, s, r, pt)
+
+        if self._seed_px is not None and time.monotonic() - self._seed_t < 2.5:
+            q = pt(*self._seed_px)
+            p.setPen(QPen(c("butter"), 1.6, Qt.PenStyle.DashLine))
+            p.setBrush(Qt.BrushStyle.NoBrush)
+            p.drawEllipse(q, 26, 26)
+            p.setFont(font(8, 650))
+            self._tag(p, q + QPointF(30, 0), "track this", c("butter"))
 
         self._hud(p, s, r, state, scol)
         if self.layers["zoom"]:

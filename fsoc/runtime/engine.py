@@ -21,6 +21,7 @@ import numpy as np
 from ..core.controller import GimbalController
 from ..core.geometry import CameraIntrinsics
 from ..core.pipeline import PipelineOutput, TrackingPipeline
+from ..core.video import VideoBeaconDetector
 from ..io.gimbal import SimulatedGimbal
 from ..io.sources import VideoFileSource
 from ..sim.patterns import INFO_BY_KEY
@@ -114,6 +115,7 @@ class Engine:
 
     def __init__(self, seed: int = 42, pattern: str = "orbit") -> None:
         self.K = CameraIntrinsics.from_fov(640, 480, 4.0, 3.0)
+        self._sim_K = self.K
         self.seed = seed
         self.world = SimWorld(seed, pattern)
         self.gimbal = SimulatedGimbal()
@@ -311,25 +313,36 @@ class Engine:
         self._post(self.pipeline.reset_identity)
 
     # -------------------------------------------------------------------- video
-    def load_video(self, path: str, hfov_deg: float = 4.0) -> None:
-        """Switch to a recorded video: the exact same TrackingPipeline and GimbalController run
-        on real frames instead of the simulator. No ground truth exists for a real recording, so
-        the SIH scoring that depends on it (tracking error, target loss, re-acquisition) reports
-        "—"; acquisition, processing speed and camera update rate are still measured live."""
+    VIDEO_PX_PER_DEG = 160.0
+
+    def load_video(self, path: str, hfov_deg: Optional[float] = None) -> None:
+        """Switch to a recorded video: the exact same detector, identifier, Kalman tracker and
+        controller run on real frames instead of the simulator.
+
+        A real clip has its own resolution, so the whole pipeline is rebuilt around the video's
+        intrinsics — keeping the simulator's 640x480 ones would leave every pixel<->angle
+        conversion, ROI and overlay at the wrong scale. An uncalibrated recording gives no way to
+        know its true field of view, so the default keeps the angular scale the gates were tuned
+        at (`VIDEO_PX_PER_DEG`); pass `hfov_deg` when the real optics are known.
+        """
         def do():
+            fov = hfov_deg
             try:
-                src = VideoFileSource(path, hfov_deg=hfov_deg)
+                if fov is None:                      # probe the size first to pick a sane FOV
+                    probe = VideoFileSource(path, hfov_deg=4.0)
+                    fov = max(2.0, probe.intrinsics.width / self.VIDEO_PX_PER_DEG)
+                    probe.close()
+                src = VideoFileSource(path, hfov_deg=fov)
             except Exception as ex:
                 self.video_error = str(ex)
+                self.ui_revision += 1
                 return
             if self.video_source is not None:
                 self.video_source.close()
             self.video_source = src
             self._video_path = path
             self.video_error = None
-            self.pipeline.cfg.require_cue = False   # no telemetry cue for a recorded video
-            self.pipeline.clear_cue()
-            self._restart_tracking(self.clock.now())
+            self._rebuild_for(src.intrinsics, video=True)
             self.ui_revision += 1
         self._post(do)
 
@@ -340,10 +353,30 @@ class Engine:
             self.video_source = None
             self._video_path = None
             self.video_error = None
-            self.pipeline.cfg.require_cue = True
-            self._restart_tracking(self.clock.now(), park=True)
+            self._rebuild_for(self._sim_K, video=False)
             self.ui_revision += 1
         self._post(do)
+
+    def _rebuild_for(self, K: CameraIntrinsics, video: bool) -> None:
+        """Point the whole vision chain at a new camera geometry (simulator <-> video)."""
+        self.K = K
+        self.pipeline = TrackingPipeline(K, detector=VideoBeaconDetector(K) if video else None)
+        self.pipeline.cfg.require_cue = not video    # a recording has no telemetry cue
+        if video:
+            self.pipeline.clear_cue()
+        self.evaluator = Evaluator(K, has_truth=not video)
+        self.recorder.clear()
+        self.controller.reset()
+        self._last_control_t = None
+        if not video:
+            self.gimbal.reset(*self._park_pose(self.clock.now()))
+        self.evaluator.reset(self.clock.now())
+        self.run_id += 1
+
+    def seed_target(self, x: float, y: float) -> None:
+        """Operator points at the target in the camera view ("that one"). Works in video mode
+        where no telemetry cue exists, and on stubborn real footage full of look-alikes."""
+        self._post(lambda: self.pipeline.seed_target(x, y))
 
     @property
     def is_video(self) -> bool:
