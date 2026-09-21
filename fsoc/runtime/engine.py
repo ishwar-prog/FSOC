@@ -21,7 +21,7 @@ import numpy as np
 from ..core.controller import GimbalController
 from ..core.geometry import CameraIntrinsics
 from ..core.pipeline import PipelineOutput, TrackingPipeline
-from ..core.video import VideoBeaconDetector
+from ..core.video import EgoMotion, VideoBeaconDetector
 from ..io.gimbal import SimulatedGimbal
 from ..io.sources import VideoFileSource
 from ..sim.patterns import INFO_BY_KEY
@@ -144,6 +144,7 @@ class Engine:
         self.video_source: Optional[VideoFileSource] = None
         self._video_path: Optional[str] = None
         self.video_error: Optional[str] = None
+        self._ego: Optional[EgoMotion] = None
         self.gimbal.reset(*self._park_pose(0.0))
 
     # ================================================================ lifecycle
@@ -314,6 +315,7 @@ class Engine:
 
     # -------------------------------------------------------------------- video
     VIDEO_PX_PER_DEG = 160.0
+    VIDEO_EGO_MOTION = False
 
     def load_video(self, path: str, hfov_deg: Optional[float] = None) -> None:
         """Switch to a recorded video: the exact same detector, identifier, Kalman tracker and
@@ -362,8 +364,14 @@ class Engine:
         self.K = K
         self.pipeline = TrackingPipeline(K, detector=VideoBeaconDetector(K) if video else None)
         self.pipeline.cfg.require_cue = not video    # a recording has no telemetry cue
+        # Ego-motion (camera pan compensation) is implemented and measures pans correctly, but on
+        # the test recordings it did more harm than good (glitch frames); opt-in for now.
+        self._ego = EgoMotion(K.fx, K.fy) if (video and self.VIDEO_EGO_MOTION) else None
         if video:
             self.pipeline.clear_cue()
+            # real scenes (smoke, cracks, star fields) offer far more lights than the simulator;
+            # the identifier must be able to keep all of them in view to rank them fairly
+            self.pipeline.identifier.MAX_TRACKLETS = 48
         self.evaluator = Evaluator(K, has_truth=not video)
         self.recorder.clear()
         self.controller.reset()
@@ -479,6 +487,12 @@ class Engine:
             frame = self.video_source.read()
         if frame is None:
             return
+        if frame.frame_id <= 1 and self._ego is not None:
+            self._ego.reset()                 # new clip or loop: the camera pose starts afresh
+        if self._ego is not None:
+            # no encoders on a recording: the camera's own pan/shake, measured from the image,
+            # stands in for them so the tracker keeps working in stable scene angles
+            frame.gimbal_az, frame.gimbal_el = self._ego.update(frame.image)
         out = self.pipeline.process_frame(frame)
         render_ms = (time.perf_counter() - c0) * 1000.0
         # No ground truth exists for a real recording; the pipeline and GUI already treat a

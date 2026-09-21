@@ -76,7 +76,8 @@ class Features:
 
 class Tracklet:
     __slots__ = ("id", "az", "el", "vaz", "vel", "t", "born", "last_det", "hits", "samples",
-                 "det_az", "det_el", "det_t", "feat", "llr", "p", "outside", "px", "distinct")
+                 "det_az", "det_el", "det_t", "feat", "llr", "p", "outside", "px", "distinct",
+                 "lflux", "size", "lo", "hi", "sal", "terms", "integ")
 
     def __init__(self, tid: int, t: float, az: float, el: float) -> None:
         self.id = tid
@@ -92,6 +93,24 @@ class Tracklet:
         self.outside = 0
         self.px = None
         self.distinct = 0.0          # how differently this light moves from the rest of the field
+        self.lflux = None            # log detection flux (EMA) — how prominent it is
+        self.size = 2.0              # apparent radius, px — photometry aperture follows it
+        self.lo = self.hi = None     # pixel extent it has covered (static-overlay test)
+        self.sal = -9.0              # integrated "is this the target?" score (no-cue mode)
+        self.terms = None            # last evidence terms (prominence, keyed, persist, overlay, distinct)
+        self.integ = None            # time-integrated evidence behind `sal`
+
+    def observe(self, c) -> None:
+        # Prominence on integrated flux: peak SNR saturates for every bright point on a phone
+        # sensor, so it cannot tell a beacon from its neighbours; total light still can.
+        lf = math.log(max(c.flux, 1.0))
+        self.lflux = lf if self.lflux is None else self.lflux + 0.15 * (lf - self.lflux)
+        self.size += 0.2 * (0.5 * math.sqrt(max(c.area, 1.0)) - self.size)
+        if self.lo is None:
+            self.lo, self.hi = [c.x, c.y], [c.x, c.y]
+        else:
+            self.lo = [min(self.lo[0], c.x), min(self.lo[1], c.y)]
+            self.hi = [max(self.hi[0], c.x), max(self.hi[1], c.y)]
 
     @property
     def age(self) -> float:
@@ -146,6 +165,7 @@ class BeaconIdentifier:
         self._fs = 30.0
         self._mismatch_s = 0.0
         self.locked_id: Optional[int] = None
+        self._occ: Optional[np.ndarray] = None      # image-position occupancy (overlay test)
 
     # --------------------------------------------------------------- lifecycle
     def reset(self, keep_signature: bool = True) -> None:
@@ -205,6 +225,7 @@ class BeaconIdentifier:
             tr.det_az, tr.det_el, tr.det_t, tr.last_det = az, el, t, t
             tr.hits += 1
             tr.px = (c.x, c.y)
+            tr.observe(c)
             assigned[ci] = tr
         for ti, tr in enumerate(self.tracklets):
             if ti not in used_t:
@@ -216,6 +237,7 @@ class BeaconIdentifier:
                 continue
             tr = Tracklet(self._next, t, az, el)
             tr.px = (c.x, c.y)
+            tr.observe(c)
             self._next += 1
             self.tracklets.append(tr)
             assigned[ci] = tr
@@ -225,11 +247,14 @@ class BeaconIdentifier:
         keep = []
         for tr in self.tracklets:
             px = tr.px or los_to_pixel(tr.az, tr.el, gaz, gel, K)
-            if px is None or not (6 <= px[0] < W - 7 and 6 <= px[1] < H - 7):
+            # point sources keep the original 13x13 aperture; only a genuinely large light gets a
+            # larger one, so the photometry measures it rather than the inside of its own glow
+            rad = 6 if tr.size <= 4.0 else int(min(40, round(2.2 * tr.size)))
+            if px is None or not (rad <= px[0] < W - rad - 1 and rad <= px[1] < H - rad - 1):
                 tr.outside += 1
             else:
                 tr.outside = 0
-                tr.samples.append((t, _aperture_flux(image, px[0], px[1])))
+                tr.samples.append((t, _aperture_flux(image, px[0], px[1], rad)))
             if t - tr.last_det < 1.2 and tr.outside < 10:
                 keep.append(tr)
         self.tracklets = keep
@@ -241,6 +266,7 @@ class BeaconIdentifier:
             self._compute_features()
         self._score()
         self._score_motion()
+        self._score_saliency(W, H)
         return assigned
 
     # ---------------------------------------------------------------- features
@@ -365,6 +391,56 @@ class BeaconIdentifier:
             # full of perfectly static lights cannot make trivial jitter look significant.
             tr.distinct = min(1.0, d / max(3.0 * spread, 1.5e-4))
 
+    SAL_MIN_HITS = 8
+    SAL_PRIOR = -1.0                    # where a newly ranked light starts
+    SAL_RATE = 0.06                     # per frame: ~0.6 s to earn (or lose) a rank at 24-30 FPS
+    OCC_DECAY = 0.95                    # image-position occupancy memory, ~1 s
+    OCC_OVERLAY = 0.7                   # a border cell this persistently occupied is burned in
+
+    def _score_saliency(self, W: int, H: int) -> None:
+        """Which light is the target? — used when no external cue exists (recorded video).
+
+        Real footage does not promise a blinking beacon, a dark sky or a clean frame, so no
+        single cue can be trusted and none is hard-coded. Every light is rated on independent,
+        scene-relative evidence and the ratings are combined:
+
+          prominence   brightness relative to *this* field (robust z-score of log flux) — a
+                       beacon is built to stand out from its surroundings, whatever they are;
+          keyed        the learned blink-signature probability (identity), when there is one;
+          behaviour    motion that disagrees with the rest of the field (motion distinctness);
+          persistence  detected on most frames of its life, unlike noise or sparkle;
+          overlay      a light parked in the border band that never moves is almost always
+                       burned in after capture — timestamps, OSD text, logos, watermarks — and
+                       a tracker's whole job is to bring its target *to the centre*.
+
+        Nothing here is tuned to a particular clip; every term is relative to the scene.
+        """
+        live = [tr for tr in self.tracklets if tr.hits >= self.SAL_MIN_HITS and tr.lflux is not None]
+        for tr in self.tracklets:
+            tr.sal = -9.0
+        if not live:
+            return
+        lf = np.array([tr.lflux for tr in live])
+        med = float(np.median(lf))
+        mad = float(np.median(np.abs(lf - med))) * 1.4826 + 0.25
+        bx, by = 0.12 * W, 0.12 * H
+        for tr, f in zip(live, lf):
+            prom = max(-3.0, min(4.0, (f - med) / mad))
+            keyed = tr.p if tr.feat is not None else 0.0
+            persist = min(1.0, tr.hits / max(1.0, (tr.t - tr.born) * self._fs + 1.0))
+            overlay = 0.0
+            if tr.lo is not None and tr.age > 1.0:
+                ext = math.hypot(tr.hi[0] - tr.lo[0], tr.hi[1] - tr.lo[1])
+                cx, cy = 0.5 * (tr.lo[0] + tr.hi[0]), 0.5 * (tr.lo[1] + tr.hi[1])
+                border = cx < bx or cx > W - bx or cy < by or cy > H - by
+                # 5 % of the frame: a multi-lobed logo's centroid wanders tens of pixels as its
+                # lobes pass in and out of detection, yet it never actually goes anywhere
+                if border and ext < 0.05 * max(W, H):
+                    overlay = 1.0
+            tr.terms = (prom, keyed, persist, overlay, tr.distinct)
+            tr.sal = (1.0 * prom + 2.0 * keyed + 1.0 * tr.distinct
+                      + 1.5 * (persist - 0.7) - 4.0 * overlay)
+
     # ---------------------------------------------------------------- learning
     def learn(self, locked: Optional[Tracklet], dt: float) -> None:
         """Called every frame while the pipeline holds a confirmed lock."""
@@ -425,10 +501,13 @@ class BeaconIdentifier:
         return max((tr.p for tr in self.tracklets if tr.id != exclude_id), default=0.0)
 
 
-def _aperture_flux(img: np.ndarray, u: float, v: float) -> float:
+def _aperture_flux(img: np.ndarray, u: float, v: float, rad: int = 6) -> float:
+    """Background-subtracted flux in a square aperture; the outer ring estimates the sky.
+    rad=6 is the original 13x13 point-source aperture (core = inner half)."""
     iu, iv = int(round(u)), int(round(v))
-    patch = img[iv - 6:iv + 7, iu - 6:iu + 7].astype(np.float32)
+    patch = img[iv - rad:iv + rad + 1, iu - rad:iu + rad + 1].astype(np.float32)
     ring = np.concatenate((patch[0], patch[-1], patch[1:-1, 0], patch[1:-1, -1]))
     bg = float(np.median(ring))
-    core = patch[3:10, 3:10] - bg
+    q = rad // 2
+    core = patch[q:2 * rad + 1 - q, q:2 * rad + 1 - q] - bg
     return float(np.maximum(core, 0.0).sum())

@@ -178,6 +178,39 @@ premise of automatic identification is that beacons are keyed. One click resolve
 *"On target vs truth" is the share of frames where the track sits within 40 px of the true beacon
 position from the sidecar file — an independent check, not one of the six targets.*
 
+**Real recordings (1280×720, 24 FPS, with burned-in HUD text, a watermark, star-field
+brightness bursts, crack overlays, glitch bands and smoke).** On these the simulator-tuned front
+end failed outright — the beacon was ~40 px wide, the point-source top-hat hollowed it into a
+ring, and the tracker locked HUD digits instead. Three general mechanisms fixed it:
+
+- **Scale-space detection** — the same detector also runs on a ½ and ¼ image pyramid, so a
+  40 px beacon is found as cleanly as a 2 px one.
+- **Size-aware photometry** — each light's brightness is measured over an aperture matched to
+  its size, so the blink identifier sees large beacons correctly.
+- **Scene-relative saliency** (no-cue mode only) — every light is ranked on prominence vs the
+  field, blink evidence, motion distinctiveness and persistence, with a penalty for static
+  lights in the frame's border band (timestamps, OSD text, logos, watermarks). The lock is
+  continuously re-checked and handed to a clearly better-ranked light if the first pick was wrong.
+
+| Clip | On true beacon ² | Acquisition | Tracking error | Target loss | All six KPIs |
+|---|---|---|---|---|---|
+| Bright beacon + star-field burst (1) | 100.0 % | 0.35 s | 0.24 px | 0.00 % | pass |
+| Bright beacon + star-field burst (2) | 94.0 % | 0.35 s | 1.25 px | 0.00 % | pass |
+| Three dots + crack overlays (1) | 99.3 % | 0.33 s | 0.39 px | 0.00 % | pass |
+| Three dots + crack overlays (2) | 95.8 % | 0.33 s | 1.00 px | 0.00 % | pass |
+| Smoke + cracks + fast pan | 15.6 % | 0.35 s | 0.16 px | 0.00 % | pass — **but wrong light** |
+
+² Share of frames within 40 px of the beacon position labelled offline from the whole clip
+(most prominent light that is not a static border overlay). This independent check matters:
+the six KPIs are self-measured on video and **cannot tell a correct lock from a wrong one** —
+the last clip passes all six while holding the wrong light.
+
+**Known limits (prototype).** The smoke/pan clip is not solved: the whole scene sweeps
+~24 px/frame and the three dots are near-identical in brightness. Camera ego-motion estimation
+(`EgoMotion` in `fsoc/core/video.py`) measures that pan correctly but was destabilised by glitch
+frames on the other clips, so it is implemented but off (`Engine.VIDEO_EGO_MOTION`). Click-to-seed
+remains available for ambiguous footage.
+
 **How the six targets are scored without ground truth.** A real recording has no known beacon
 position, so three of them are re-derived from what a real terminal can observe about itself, and
 the UI says so:

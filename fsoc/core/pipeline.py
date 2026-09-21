@@ -331,6 +331,15 @@ class TrackingPipeline:
             # identity evidence alone must not be allowed to hand the lock to a blinking decoy.
             self._bad_lock_s = 0.0
             return None
+        if self._cue is None and idf.enabled:
+            best = self._salient_challenger(ltr, los)
+            if best is None:
+                self._bad_lock_s = 0.0
+                return None
+            self._bad_lock_s += dt
+            if self._bad_lock_s < self.SAL_HANDOVER_S:
+                return None
+            return self._switch_to(t, *best[1:])
         if not idf.enabled or ltr is None or ltr.feat is None or ltr.feat.span_s < 1.2 or ltr.p >= 0.2:
             self._bad_lock_s = 0.0
             return None
@@ -350,7 +359,26 @@ class TrackingPipeline:
                 best, best_key = (i, c, az, el, tr), key
         if best is None:
             return None
-        i, c, az, el, tr = best
+        return self._switch_to(t, *best[1:])
+
+    SAL_HANDOVER_S = 0.5               # a better-ranked light must stay better this long
+    SAL_MARGIN = 1.5                   # ...by at least this much saliency
+
+    def _salient_challenger(self, ltr, los):
+        """No-cue self-correction: is some other visible light now clearly more target-like than
+        the one we hold? The ranking keeps learning as the clip plays, so an early lock onto an
+        overlay or a star is undone as soon as the evidence says so."""
+        cur = ltr.sal if (ltr is not None and ltr.sal > -9.0) else -3.0
+        best, best_sal = None, cur + self.SAL_MARGIN
+        for i, (c, az, el, r) in enumerate(los):
+            tr = self._assign[i] if i < len(self._assign) else None
+            if tr is None or tr is ltr or tr.sal <= -9.0 or c.snr < self.cfg.min_snr_track:
+                continue
+            if tr.sal > best_sal:
+                best, best_sal = (i, c, az, el, tr), tr.sal
+        return best
+
+    def _switch_to(self, t: float, c, az: float, el: float, tr) -> Candidate:
         kf = LosKalmanTracker()
         kf.initialize(t, az, el, tr.vaz, tr.vel, pos_sigma=(0.4 / self.K.fx) * 4, vel_sigma=0.5 * DEG)
         self.tracker = kf
@@ -566,9 +594,12 @@ class TrackingPipeline:
                         return None              # nothing convincing there yet — keep waiting
         allow_spawn = reacq or self._search_started or seeded_now \
             or (self._cue is None and not cfg.require_cue)
-        for i, (c, az, el, r) in enumerate(los):
+        order = range(len(los))
+        max_h = cfg.max_hypotheses
+        for i in order:
+            c, az, el, r = los[i]
             if (not allow_spawn or i in used or c.snr < cfg.min_snr_new
-                    or len(self._hyps) >= cfg.max_hypotheses):
+                    or len(self._hyps) >= max_h):
                 continue
             if self._is_known_clutter(i) and not seeded_now:
                 continue
@@ -684,6 +715,15 @@ class TrackingPipeline:
         idf = self.identifier
         if not idf.enabled or h.seeded:
             return True                       # the operator already said which light this is
+        if self._cue is None and not reacq:
+            # No cue: lock only the light the scene evidence ranks as the target, once it has been
+            # watched long enough to rank at all. (The keyed-only rules below would let any
+            # flickering overlay veto the real target forever when there is no cue cone.)
+            tr = idf.by_id.get(h.tid)
+            if tr is None or tr.sal <= -9.0 or t - h.born < 0.35:
+                return False
+            best = max((o.sal for o in idf.tracklets), default=-9.0)
+            return tr.sal >= best - 0.5
         tr = idf.by_id.get(h.tid)
         p = tr.p if (tr is not None and tr.feat is not None) else None
         if reacq:
@@ -745,11 +785,11 @@ class TrackingPipeline:
         tr = self.identifier.by_id.get(h.tid)
         if tr is not None and tr.feat is not None and self.identifier.enabled:
             s += 0.8 * tr.llr
-        if tr is not None and self._cue is None and self.identifier.enabled:
-            # No external cue to point the way (a recorded video), so behaviour has to carry more
-            # weight: prefer the light that moves unlike the rest of the field over whichever one
-            # merely happens to be brightest. With a cue present this stays off entirely.
-            s += 2.5 * tr.distinct
+        if tr is not None and self._cue is None and self.identifier.enabled and tr.sal > -9.0:
+            # No external cue to point the way (a recorded video): the identifier's scene-relative
+            # saliency — prominence, keying, behaviour, persistence, not-an-overlay — decides.
+            # With a cue present this stays off entirely, so the simulator is unaffected.
+            s += 1.5 * tr.sal
         if h.hits >= 3:
             s -= 3.0 * h.lf_var if tr is None or tr.feat is None else 0.0
             if reacq:

@@ -33,6 +33,74 @@ from .detector import BeaconDetector, Candidate, DetectionResult
 from .geometry import CameraIntrinsics
 
 
+class EgoMotion:
+    """Estimate the camera's own rotation from the image, for footage with no gimbal encoders.
+
+    On a real gimbal the tracker knows where the camera points and works in line-of-sight
+    angles, so a pan does not move the target in its world. A handheld or vehicle recording has
+    no encoders: when the camera pans, *every* light slides across the frame and a static-camera
+    tracker loses its target instantly. Phase correlation of successive frames (band-passed so
+    it keys on the star field / scene texture, not on smooth glow or smoke) measures that global
+    shift; accumulated and converted to angles it stands in for the missing encoder, so the
+    identical tracker keeps working through pans and shake.
+    """
+
+    MIN_RESPONSE = 0.06                 # below this the correlation peak is not trustworthy
+    SCALE = 0.5
+
+    def __init__(self, fx: float, fy: float) -> None:
+        self.fx, self.fy = fx, fy
+        self.reset()
+
+    MAX_ACCEL = 8.0                     # per-frame change of shift a real pan can make (1/2-res px)
+    MAX_GAP = 6                         # frames to wait for clean video before re-anchoring
+
+    def reset(self) -> None:
+        self._prev = None
+        self._win = None
+        self._v = (0.0, 0.0)           # last accepted per-frame shift (1/2-res px)
+        self._gap = 1                  # frames since the reference frame was taken
+        self.dx = self.dy = 0.0        # accumulated image shift, full-resolution pixels
+
+    def update(self, gray: np.ndarray):
+        """Return the accumulated (az, el) of the camera in radians.
+
+        Real footage has glitch frames — compression tearing, a dropped field, a flash — on which
+        phase correlation returns a large, bogus shift. A camera has inertia: a genuine pan builds
+        up and dies away over several frames, it does not jump. A shift whose change from the
+        previous one is physically implausible is rejected, and the *last good* frame is kept as
+        the reference, so the next clean frame is measured against it and nothing is lost.
+        """
+        s = self.SCALE
+        small = cv2.resize(gray, None, fx=s, fy=s, interpolation=cv2.INTER_AREA).astype(np.float32)
+        band = small - cv2.GaussianBlur(small, (0, 0), 6.0)
+        if self._win is None or self._win.shape != band.shape:
+            self._win = cv2.createHanningWindow((band.shape[1], band.shape[0]), cv2.CV_32F)
+        if self._prev is None:
+            self._prev = band
+        else:
+            (sx, sy), resp = cv2.phaseCorrelate(self._prev, band, self._win)
+            lim = 0.2 * band.shape[1]
+            g = self._gap
+            ok = resp >= self.MIN_RESPONSE and abs(sx) < lim and abs(sy) < lim
+            if ok:
+                ex, ey = self._v[0] * g, self._v[1] * g          # what inertia predicts
+                ok = math.hypot(sx - ex, sy - ey) <= self.MAX_ACCEL * g
+            if ok:
+                self.dx += sx / s
+                self.dy += sy / s
+                self._v = (sx / g, sy / g)
+                self._prev, self._gap = band, 1
+            elif g >= self.MAX_GAP:
+                # clean video never came back in time: accept the new view as the reference
+                # (a genuine cut); the tracker's own gating handles whatever jump that implies
+                self._prev, self._gap, self._v = band, 1, (0.0, 0.0)
+            else:
+                self._gap += 1
+        # scene moves left (dx < 0) when the camera turns right (azimuth up); image y is down
+        return -self.dx / self.fx, self.dy / self.fy
+
+
 class VideoBeaconDetector(BeaconDetector):
     MERGE_PX = 6.0                     # candidates closer than this are the same light
     MAX_MOTION_BLOBS = 10
@@ -47,7 +115,7 @@ class VideoBeaconDetector(BeaconDetector):
         # Measured on real footage: loosening the shape gates much beyond the simulator's is a
         # net loss — cloud edges and building corners start qualifying and flood the association
         # gate. Allow a genuinely closer (larger) target, keep the point-source shape tests.
-        kw.setdefault("max_area", 4000)
+        kw.setdefault("max_area", 2500)          # per pyramid level; 1/4 scale covers ~40,000 px
         kw.setdefault("max_elongation", 3.2)
         kw.setdefault("max_candidates", 32)
         super().__init__(**kw)
@@ -133,9 +201,44 @@ class VideoBeaconDetector(BeaconDetector):
         return out
 
     # ------------------------------------------------------------------ detect
+    PYRAMID = (2, 4)                   # extra scales: a beacon 40 px across is a point at 1/4
+
+    def _multiscale(self, gray: np.ndarray, res: DetectionResult) -> None:
+        """Scale-space detection.
+
+        The point-source stages (top-hat, matched filter, shape tests) are tuned for a spot a
+        few pixels across. A real beacon filmed up close, or blooming on a phone sensor, can be
+        tens of pixels wide: the top-hat hollows it into a ring and the shape tests reject what
+        is left, so the most obvious light in the frame is never even offered to the tracker.
+        Running the same detector on a 1/2 and 1/4 image pyramid finds every source at the
+        scale where it *is* a point; results are mapped back and de-duplicated, keeping the
+        strongest response for each physical light.
+        """
+        allc = [(c, 1) for c in res.candidates]
+        for s in self.PYRAMID:
+            small = cv2.resize(gray, (gray.shape[1] // s, gray.shape[0] // s), interpolation=cv2.INTER_AREA)
+            if min(small.shape) < 48:
+                continue
+            sub = BeaconDetector.detect(self, small, None)
+            for c in sub.candidates:
+                allc.append((Candidate(c.x * s + (s - 1) / 2.0, c.y * s + (s - 1) / 2.0, c.snr,
+                                       c.flux * s * s, c.peak, c.area * s * s, c.elongation), s))
+        allc.sort(key=lambda cs: cs[0].snr, reverse=True)
+        kept: List[Candidate] = []
+        for c, s in allc:
+            r_new = 0.6 * math.sqrt(max(c.area, 1))
+            if all(math.hypot(c.x - k.x, c.y - k.y) > max(self.MERGE_PX, r_new + 0.6 * math.sqrt(max(k.area, 1)))
+                   for k in kept):
+                kept.append(c)
+        del kept[self.max_candidates:]
+        res.candidates = kept
+
     def detect(self, image: np.ndarray, roi: Optional[Tuple[int, int, int, int]] = None) -> DetectionResult:
         gray = image if image.ndim == 2 else cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
-        res = super().detect(gray, roi)
+        res = super().detect(gray, None)      # full frame: a pyramid needs the whole view anyway
+        t0 = cv2.getTickCount()
+        self._multiscale(gray, res)
+        res.proc_ms += (cv2.getTickCount() - t0) / cv2.getTickFrequency() * 1000.0
         if not self.motion_enabled:
             return res
         # Motion runs full-frame (the background model needs a consistent view) but only ever
