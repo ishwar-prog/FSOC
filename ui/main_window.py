@@ -1,4 +1,4 @@
-"""Main window: top bar, Live tracking / Analytics pages, adjustable screens, light/dark theme."""
+"""Main window: top bar, Live tracking / Analytics pages, adjustable screens."""
 
 import math
 
@@ -9,15 +9,14 @@ from PySide6.QtWidgets import (QFrame, QGridLayout, QHBoxLayout, QLabel, QMainWi
 
 from fsoc import __version__
 from fsoc.runtime.engine import Engine
-from . import theme
 from .analytics_page import AnalyticsPage
 from .camera_view import CameraView
 from .charts import History
 from .control_rail import ControlRail
 from .info_text import tip
 from .kpi_panel import KpiPanel
-from .theme import P, STATE_COLOR, mono, qss
-from .widgets import Card, InfoButton, Pill, Segmented, StatRow, label
+from .theme import P, STATE_COLOR, UNIT, num
+from .widgets import Card, Pill, StatRow, TabBar, label
 from .world_view import WorldView
 
 DEG = math.pi / 180.0
@@ -29,14 +28,14 @@ def app_icon() -> QIcon:
     p = QPainter(pm)
     p.setRenderHint(QPainter.RenderHint.Antialiasing)
     p.setPen(Qt.PenStyle.NoPen)
-    p.setBrush(QColor("#8B7CC8"))
-    p.drawRoundedRect(QRectF(2, 2, 60, 60), 16, 16)
-    p.setPen(QPen(QColor("white"), 4, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap))
-    p.drawLine(QPointF(16, 46), QPointF(46, 18))
-    p.setBrush(QColor("white"))
+    p.setBrush(QColor(P["head"]))
+    p.drawRect(QRectF(2, 2, 60, 60))
+    p.setPen(QPen(QColor(P["accent"]), 4))
+    p.drawLine(QPointF(14, 48), QPointF(44, 20))
+    p.setBrush(QColor(P["accent"]))
     p.setPen(Qt.PenStyle.NoPen)
-    p.drawEllipse(QPointF(46, 18), 7, 7)
-    p.drawEllipse(QPointF(16, 46), 5, 5)
+    p.drawRect(QRectF(38, 14, 14, 14))
+    p.drawRect(QRectF(12, 44, 8, 8))
     p.end()
     return QIcon(pm)
 
@@ -44,7 +43,7 @@ def app_icon() -> QIcon:
 class Logo(QWidget):
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
-        self.setFixedSize(38, 38)
+        self.setFixedSize(32, 32)
 
     def paintEvent(self, e) -> None:
         QPainter(self).drawPixmap(self.rect(), app_icon().pixmap(64, 64))
@@ -57,9 +56,10 @@ class ChipToggle(QPushButton):
         self.setChecked(on)
         self.setCursor(Qt.CursorShape.PointingHandCursor)
         self.setStyleSheet(
-            f"QPushButton {{ padding: 3px 10px; border-radius: 10px; font-size: 8.4pt; font-weight: 600;"
+            f"QPushButton {{ padding: 4px 10px; font-size: 8.4pt; font-weight: 500;"
             f" background: {P['surface']}; color: {P['muted']}; border: 1px solid {P['border']}; }}"
-            f"QPushButton:checked {{ background: {P['accent_soft']}; color: {P['accent_hover']};"
+            f"QPushButton:hover {{ color: {P['head']}; border-color: {P['border_strong']}; }}"
+            f"QPushButton:checked {{ background: {P['accent_soft']}; color: {P['accent_ink']}; font-weight: 600;"
             f" border: 1px solid {P['accent']}; }}")
 
 
@@ -85,7 +85,6 @@ class MainWindow(QMainWindow):
 
     # ================================================================ build
     def _build(self) -> None:
-        self.setStyleSheet(qss())
         root = QWidget()
         root.setObjectName("root")
         v = QVBoxLayout(root)
@@ -93,11 +92,7 @@ class MainWindow(QMainWindow):
         v.setSpacing(0)
         v.addWidget(self._top_bar())
         self.pages = QStackedWidget()
-        wrap = QWidget()
-        wl = QVBoxLayout(wrap)
-        wl.setContentsMargins(14, 12, 14, 12)
-        wl.addWidget(self.pages)
-        v.addWidget(wrap, 1)
+        v.addWidget(self.pages, 1)
         self.pages.addWidget(self._live_page())
         self.analytics = AnalyticsPage(self.engine, self.history)
         self.pages.addWidget(self.analytics)
@@ -111,62 +106,58 @@ class MainWindow(QMainWindow):
 
     def _top_bar(self) -> QWidget:
         bar = QFrame()
-        bar.setFixedHeight(62)
-        bar.setStyleSheet(f"QFrame {{ background: {P['surface']}; border-bottom: 1px solid {P['border']}; }}"
+        bar.setFixedHeight(56)
+        bar.setStyleSheet(f"QFrame {{ background: {P['surface']}; border-bottom: 1px solid {P['border_strong']}; }}"
                           f"QLabel {{ border: none; background: transparent; }}")
         h = QHBoxLayout(bar)
-        h.setContentsMargins(18, 8, 18, 8)
-        h.setSpacing(12)
+        h.setContentsMargins(UNIT * 2, 0, UNIT * 2, 0)
+        h.setSpacing(UNIT * 2)
         h.addWidget(Logo())
         tb = QVBoxLayout()
-        tb.setSpacing(0)
-        t = label("FSOC Beacon Tracker", "h1")
-        t.setStyleSheet("font-size: 13pt; font-weight: 700;")
+        tb.setSpacing(1)
+        t = label("FSOC BEACON TRACKER", "h1")
+        t.setStyleSheet(f"font-size: 12pt; font-weight: 700; letter-spacing: -0.2px; color: {P['head']};")
         tb.addWidget(t)
-        tb.addWidget(label(f"Pointing · acquisition · tracking   ·   SIH26169   ·   v{__version__}", "caption"))
+        tb.addWidget(label(f"SIH26169 · Pointing, acquisition, tracking · v{__version__}", "faint"))
         h.addLayout(tb)
+        h.addSpacing(UNIT * 3)
+        self.nav = TabBar([("live", "Live tracking"), ("analytics", "Analytics")])
+        h.addWidget(self.nav, 0, Qt.AlignmentFlag.AlignBottom)
         h.addStretch(1)
-        self.nav = Segmented([("live", "Live tracking"), ("analytics", "Analytics")])
-        h.addWidget(self.nav)
-        h.addStretch(1)
-        self.theme_btn = QPushButton("☾  Dark" if not theme.is_dark() else "☀  Light")
-        self.theme_btn.setObjectName("ghost")
-        self.theme_btn.setToolTip("Switch between light and dark mode")
-        self.theme_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.theme_btn.clicked.connect(self._toggle_theme)
-        h.addWidget(self.theme_btn)
-        self.state_pill = Pill("SEARCHING", "peach", size=8.6)
-        self.state_pill.setMinimumWidth(118)
-        h.addWidget(self.state_pill)
+        self.state_pill = Pill("SEARCHING", "butter", size=8.4)
+        self.state_pill.setMinimumWidth(112)
+        self.state_pill.setFixedHeight(26)
+        h.addWidget(self.state_pill, 0, Qt.AlignmentFlag.AlignVCenter)
         self.clock = QLabel("00:00.0")
-        self.clock.setFont(mono(11, 600))
-        self.clock.setStyleSheet(f"color: {P['muted']};")
-        self.clock.setFixedWidth(84)
-        self.clock.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        h.addWidget(self.clock)
+        self.clock.setFont(num(11.5, 600))
+        self.clock.setStyleSheet(f"color: {P['head']};")
+        self.clock.setFixedWidth(76)
+        self.clock.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+        h.addWidget(self.clock, 0, Qt.AlignmentFlag.AlignVCenter)
         self.pause_btn = QPushButton("Pause")
         self.pause_btn.setObjectName("primary")
         self.pause_btn.setFixedWidth(96)
         self.pause_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.pause_btn.setFixedHeight(32)
         self.pause_btn.clicked.connect(lambda: self.engine.set_paused(not self.engine.paused))
-        h.addWidget(self.pause_btn)
+        h.addWidget(self.pause_btn, 0, Qt.AlignmentFlag.AlignVCenter)
         return bar
 
     def _live_page(self) -> QWidget:
         self.hsplit = QSplitter(Qt.Orientation.Horizontal)
-        self.hsplit.setHandleWidth(12)
+        self.hsplit.setHandleWidth(1)
         self.hsplit.setChildrenCollapsible(False)
 
         self.rail = ControlRail(self.engine, self._ui_state["tab"])
-        self.rail.setMinimumWidth(330)
+        self.rail.setMinimumWidth(320)
         self.hsplit.addWidget(self.rail)
 
         self.vsplit = QSplitter(Qt.Orientation.Vertical)
-        self.vsplit.setHandleWidth(12)
+        self.vsplit.setHandleWidth(1)
         self.vsplit.setChildrenCollapsible(False)
 
-        self.cam_card = Card("Camera sensor", "What the tracker sees — no hidden truth is used", pad=12, spacing=8,
-                             info=tip("camera"))
+        self.cam_card = Card("Camera sensor", "What the tracker sees — no hidden truth is used",
+                             pad=UNIT * 2, spacing=UNIT, info=tip("camera"))
         layers = self._ui_state["layers"]
         self.layer_btns = {}
         for key, text in (("truth", "Truth"), ("detections", "Detections"), ("identity", "Identity"),
@@ -175,7 +166,7 @@ class MainWindow(QMainWindow):
             b.toggled.connect(lambda val, k=key: self.camera.set_layer(k, val))
             self.cam_card.header.addWidget(b, 0, Qt.AlignmentFlag.AlignTop)
             self.layer_btns[key] = b
-        self.cam_expand = QPushButton("⤢")
+        self.cam_expand = QPushButton("Expand")
         self.cam_expand.setObjectName("icon")
         self.cam_expand.setCheckable(True)
         self.cam_expand.setToolTip("Enlarge the camera screen")
@@ -188,8 +179,8 @@ class MainWindow(QMainWindow):
             self.camera.set_layer(k, b.isChecked())
         self.cam_card.body.addWidget(self.camera, 1)
         strip = QGridLayout()
-        strip.setHorizontalSpacing(18)
-        strip.setVerticalSpacing(0)
+        strip.setHorizontalSpacing(UNIT * 3)
+        strip.setVerticalSpacing(2)
         self.readouts = {}
         items = (("state", "State"), ("snr", "Beacon SNR"), ("cerr", "Centroid error"), ("gimbal", "Gimbal az / el"),
                  ("range", "Range"), ("age", "Time in state"), ("idp", "Beacon identity"), ("perr", "Pointing error"),
@@ -201,12 +192,13 @@ class MainWindow(QMainWindow):
         self.cam_card.body.addLayout(strip)
         self.vsplit.addWidget(self.cam_card)
 
-        self.world_card = Card("World view", "Terminal A → Terminal B, live", pad=12, spacing=8, info=tip("world"))
+        self.world_card = Card("World view", "Terminal A → Terminal B, live", pad=UNIT * 2, spacing=UNIT,
+                               info=tip("world"))
         reset = QPushButton("Reset view")
         reset.setObjectName("ghost")
         reset.clicked.connect(lambda: self.world.reset_view())
         self.world_card.header.addWidget(reset, 0, Qt.AlignmentFlag.AlignTop)
-        self.world_expand = QPushButton("⤢")
+        self.world_expand = QPushButton("Expand")
         self.world_expand.setObjectName("icon")
         self.world_expand.setCheckable(True)
         self.world_expand.setToolTip("Enlarge the world view")
@@ -218,7 +210,7 @@ class MainWindow(QMainWindow):
         self.hsplit.addWidget(self.vsplit)
 
         self.kpis = KpiPanel(self.engine)
-        self.kpis.setMinimumWidth(270)
+        self.kpis.setMinimumWidth(280)
         self.kpis.restart_clicked.connect(self.engine.cold_restart)
         self.kpis.block_clicked.connect(lambda: self.engine.block_beacon(2.5))
         self.hsplit.addWidget(self.kpis)
@@ -252,18 +244,6 @@ class MainWindow(QMainWindow):
     def _navigate(self, key: str) -> None:
         self._ui_state["page"] = key
         self.pages.setCurrentIndex({"live": 0, "analytics": 1}[key])
-
-    def _toggle_theme(self) -> None:
-        st = self._ui_state
-        st["tab"] = self.rail.current_tab()
-        st["layers"] = {k: b.isChecked() for k, b in self.layer_btns.items()}
-        hs, vs = self.hsplit.sizes(), self.vsplit.sizes()
-        st["h_sizes"] = [x / max(1, sum(hs)) for x in hs]
-        st["v_sizes"] = [x / max(1, sum(vs)) for x in vs]
-        theme.set_mode("light" if theme.is_dark() else "dark")
-        import pyqtgraph as pg
-        pg.setConfigOptions(foreground=P["muted"], background=P["surface"])
-        self._build()
 
     def _on_tick(self) -> None:
         self._tick += 1

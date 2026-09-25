@@ -18,17 +18,15 @@ def _crash_log(text: str) -> str:
 
 
 def main() -> int:
-    from PySide6.QtCore import Qt
-    from PySide6.QtGui import QFont
     from PySide6.QtWidgets import QApplication, QMessageBox
 
     app = QApplication(sys.argv)
     app.setApplicationName("FSOC Beacon Tracker")
     app.setOrganizationName("SIH26169")
     app.setStyle("Fusion")
-    f = QFont("Segoe UI")
-    f.setPointSizeF(10)
-    app.setFont(f)
+
+    from ui import theme
+    theme.install(app)
 
     def excepthook(etype, value, tb):
         text = "".join(traceback.format_exception(etype, value, tb))
@@ -37,7 +35,7 @@ def main() -> int:
 
     sys.excepthook = excepthook
 
-    from gui.main_window import MainWindow
+    from ui.main_window import MainWindow
     win = MainWindow()
     win.showMaximized()
     return app.exec()

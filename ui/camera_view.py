@@ -10,7 +10,7 @@ from PySide6.QtGui import QColor, QImage, QPainter, QPainterPath, QPen
 from PySide6.QtWidgets import QWidget
 
 from fsoc.core.geometry import CameraIntrinsics, los_to_pixel
-from .theme import STATE_COLOR, c, font, mono
+from .theme import STATE_COLOR, c, font, mono, num
 
 DEG = math.pi / 180.0
 
@@ -100,7 +100,7 @@ class CameraView(QWidget):
         clip = QPainterPath()
         clip.addRoundedRect(r, 12, 12)
         p.setClipPath(clip)
-        p.fillRect(r, QColor("#0C0B12"))
+        p.fillRect(r, QColor("#0B1120"))
         s = self.snap
         if s is None or self._qimg is None:
             p.setPen(c("faint"))
@@ -133,7 +133,7 @@ class CameraView(QWidget):
         x0, y0, x1, y1 = o.roi
         if self.layers["roi"] and (x1 - x0) < self.K.width:
             p.setPen(QPen(c("accent", 200), 1.2, Qt.PenStyle.DashLine))
-            p.drawRoundedRect(QRectF(pt(x0, y0), pt(x1, y1)), 6, 6)
+            p.drawRect(QRectF(pt(x0, y0), pt(x1, y1)))
 
         if self.layers["detections"]:
             p.setPen(QPen(QColor(255, 255, 255, 110), 1))
@@ -200,11 +200,11 @@ class CameraView(QWidget):
     def _tag(self, p, at: QPointF, text: str, col: QColor, small: bool = False) -> None:
         fm = p.fontMetrics()
         w = fm.horizontalAdvance(text) + (10 if small else 14)
-        h = 16 if small else 20
+        h = 15 if small else 19
         rect = QRectF(at.x(), at.y() - h / 2, w, h)
         p.setPen(Qt.PenStyle.NoPen)
-        p.setBrush(QColor(20, 18, 30, 170))
-        p.drawRoundedRect(rect, h / 2, h / 2)
+        p.setBrush(QColor(11, 17, 32, 200))
+        p.drawRect(rect)
         p.setPen(col)
         p.drawText(rect, Qt.AlignmentFlag.AlignCenter, text)
 
@@ -260,15 +260,15 @@ class CameraView(QWidget):
                   c("peach"))
 
     def _hud(self, p, s, r, state, scol) -> None:
-        p.setFont(font(8.6, 700))
+        p.setFont(font(8.4, 600, tracking=0.8))
         text = STATE_COLOR.get(state, ("faint", state))[1].upper()
         w = p.fontMetrics().horizontalAdvance(text) + 34
         rect = QRectF(r.left() + 12, r.top() + 12, w, 24)
         p.setPen(Qt.PenStyle.NoPen)
-        p.setBrush(QColor(20, 18, 30, 175))
-        p.drawRoundedRect(rect, 12, 12)
+        p.setBrush(QColor(11, 17, 32, 205))
+        p.drawRect(rect)
         p.setBrush(scol)
-        p.drawEllipse(QPointF(rect.left() + 13, rect.center().y()), 4.5, 4.5)
+        p.drawRect(QRectF(rect.left() + 9, rect.center().y() - 4, 8, 8))
         p.setPen(QColor(255, 255, 255, 235))
         p.drawText(rect.adjusted(22, 0, 0, 0), Qt.AlignmentFlag.AlignVCenter, text)
 
@@ -277,8 +277,8 @@ class CameraView(QWidget):
         w2 = p.fontMetrics().horizontalAdvance(info) + 18
         rect2 = QRectF(r.right() - w2 - 12, r.top() + 12, w2, 24)
         p.setPen(Qt.PenStyle.NoPen)
-        p.setBrush(QColor(20, 18, 30, 150))
-        p.drawRoundedRect(rect2, 12, 12)
+        p.setBrush(QColor(11, 17, 32, 180))
+        p.drawRect(rect2)
         p.setPen(QColor(255, 255, 255, 200))
         p.drawText(rect2, Qt.AlignmentFlag.AlignCenter, info)
 
@@ -328,7 +328,7 @@ class CameraView(QWidget):
         p.restore()
         p.setPen(QPen(QColor(255, 255, 255, 170), 1.2))
         p.setBrush(Qt.BrushStyle.NoBrush)
-        p.drawRoundedRect(box, 10, 10)
+        p.drawRect(box)
         p.setFont(mono(7.6, 600))
         err = s.centroid_err
         txt = f"×{zk:.1f}   Δ {err:.2f} px" if err is not None else f"×{zk:.1f}"

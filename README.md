@@ -329,10 +329,11 @@ fsoc/core/              detector, identity, tracker, pipeline, controller, geome
 fsoc/io/                frame sources, gimbal interfaces
 fsoc/sim/               world, terminals, patterns, sky, hazards, renderer
 fsoc/runtime/           engine, evaluator, recorder, validation
-gui/                    main_window, control_rail, camera_view, world_view, kpi_panel, charts,
-                        analytics_page, info_text, theme, widgets
+ui/                     main_window, control_rail, camera_view, world_view, kpi_panel, charts,
+                        analytics_page, info_text, theme (design system), widgets
 assets/app.ico
+assets/fonts/           Inter (Regular / Medium / SemiBold / Bold), bundled into the exe
 _archive/alpha_v0.3_source.zip   previous alpha build (source)
 ```
 
-The legacy alpha code (`simulation/` package and nine superseded `gui/*.py` files) is kept but not used by the application.
+The legacy alpha code (`simulation/` package and nine superseded `ui/*.py` files) is kept but not used by the application.

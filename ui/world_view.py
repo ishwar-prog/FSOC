@@ -16,7 +16,7 @@ from PySide6.QtWidgets import QWidget
 
 from fsoc.core.geometry import direction_to_los, gimbal_basis
 from fsoc.sim.terminals import RE, OrbitPass
-from .theme import HAZARD_COLOR, STATE_COLOR, c, font, is_dark, mono
+from .theme import HAZARD_COLOR, STATE_COLOR, c, font, mono, num
 from .widgets import draw_platform
 
 ALT_EX = 2.2
@@ -189,7 +189,7 @@ class WorldView(QWidget):
 
         horizon = self.proj(self.eye[0] + self.fwd[0] * 1e6, self.eye[1], self.eye[2] + self.fwd[2] * 1e6, False)
         hy = horizon.y() if horizon else self.H * 0.45
-        key = (self.W, self.H, round(self.yaw, 2), round(self.pitch, 2), round(self.dist), tod, sea, is_dark())
+        key = (self.W, self.H, round(self.yaw, 2), round(self.pitch, 2), round(self.dist), tod, sea)
         if key != self._bg_key or self._bg is None:
             dpr = self.devicePixelRatioF()
             self._bg = QPixmap(int(self.W * dpr), int(self.H * dpr))
@@ -289,7 +289,7 @@ class WorldView(QWidget):
             heading = math.atan2(q2.y() - qt.y(), q2.x() - qt.x()) if q2 else 0.0
             on = world.beacon.modulation(t) > 0.5
             self._glow(p, qt, 20 if on else 12, QColor(255, 236, 170), 210 if on else 90)
-            draw_platform(p, info.platform, qt.x(), qt.y(), 30, heading, QColor("#221E2E"),
+            draw_platform(p, info.platform, qt.x(), qt.y(), 30, heading, c("head"),
                           roll=world.remote.ship_roll(t))
             self._label(p, qt + QPointF(20, -26), "Terminal B",
                         f"{rng_t / 1000:.2f} km · {tpos[1]:.0f} m alt · {math.sqrt(sum(x * x for x in v)):.0f} m/s")
@@ -319,8 +319,6 @@ class WorldView(QWidget):
         g = QLinearGradient(0, 0, 0, max(hy, 1))
         top, bottom = {"day": ("#BFD7EE", "#EEF1F8"), "dusk": ("#8D8BB8", "#F2C9B8"),
                        "night": ("#2B2F4A", "#4A4E6E")}[tod]
-        if is_dark() and tod == "day":
-            top, bottom = "#6F8FB2", "#AFC2D6"
         g.setColorAt(0, QColor(top))
         g.setColorAt(1, QColor(bottom))
         p.fillRect(QRectF(0, 0, self.W, hy + 2), g)
@@ -353,8 +351,6 @@ class WorldView(QWidget):
         gcol = {"day": ("#DDE7D6", "#C9D8C3"), "dusk": ("#C9B9C3", "#A99AA8"), "night": ("#3C3F52", "#2E3142")}[tod]
         if sea:
             gcol = {"day": ("#CFE2EE", "#A9C8DC"), "dusk": ("#B7AFC6", "#8F8AA8"), "night": ("#34405A", "#262E44")}[tod]
-        if is_dark() and tod == "day":
-            gcol = ("#8FA08A", "#6F806C") if not sea else ("#7C98AE", "#5E7A90")
         g = QLinearGradient(0, hy, 0, self.H)
         g.setColorAt(0, QColor(gcol[0]))
         g.setColorAt(1, QColor(gcol[1]))
@@ -371,8 +367,6 @@ class WorldView(QWidget):
             path.lineTo(pts[-1].x(), hy + 1)
             path.closeSubpath()
             hc = {"day": "#C3D1C6", "dusk": "#A897AE", "night": "#34374B"}[tod]
-            if is_dark() and tod == "day":
-                hc = "#7E927F"
             p.setPen(Qt.PenStyle.NoPen)
             p.setBrush(QColor(hc))
             p.drawPath(path)
@@ -394,11 +388,11 @@ class WorldView(QWidget):
             p.drawPath(self._polyline(pts))
             q = self.proj(R * math.sin(-60 * DEG), 0, R * math.cos(-60 * DEG))
             if q:
-                p.setPen(QColor(90, 86, 110))
+                p.setPen(c("muted"))
                 p.drawText(q + QPointF(-10, -4), f"{rkm:g} km")
 
     def _terminal_a(self, p, base: QPointF, head: QPointF, gaz: float, mount: str) -> None:
-        ink = QColor("#2E2A3B")
+        ink = c("head")
         if mount == "vehicle":
             draw_platform(p, "vehicle", base.x(), base.y() - 8, 34, 0.0, ink)
         elif mount == "ship":
@@ -411,7 +405,7 @@ class WorldView(QWidget):
         p.drawLine(base, top)
         p.setPen(Qt.PenStyle.NoPen)
         p.setBrush(c("accent"))
-        p.drawRoundedRect(QRectF(top.x() - 9, top.y() - 9, 18, 12), 4, 4)
+        p.drawRect(QRectF(top.x() - 9, top.y() - 9, 18, 12))
         p.setBrush(ink)
         a = -gaz * 0.8
         p.drawEllipse(top + QPointF(math.sin(a) * 6, -3), 3, 3)
@@ -485,7 +479,7 @@ class WorldView(QWidget):
         p.drawEllipse(q, rad, rad)
 
     def _label(self, p, at: QPointF, title: str, sub: str) -> None:
-        p.setFont(font(8.6, 700))
+        p.setFont(font(8.8, 600))
         w1 = p.fontMetrics().horizontalAdvance(title)
         p.setFont(font(7.8, 500))
         w2 = p.fontMetrics().horizontalAdvance(sub)
@@ -495,11 +489,11 @@ class WorldView(QWidget):
         rect.moveLeft(max(8, rect.left()))
         if rect.top() < 8:
             rect.moveTop(8)
-        p.setPen(QPen(c("border"), 1))
-        p.setBrush(c("surface", 232))
-        p.drawRoundedRect(rect, 8, 8)
-        p.setPen(c("text"))
-        p.setFont(font(8.6, 700))
+        p.setPen(QPen(c("border_strong"), 1))
+        p.setBrush(c("surface", 238))
+        p.drawRect(rect)
+        p.setPen(c("head"))
+        p.setFont(font(8.8, 600))
         p.drawText(rect.adjusted(9, 3, 0, 0), Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop, title)
         p.setPen(c("muted"))
         p.setFont(font(7.8, 500))
@@ -507,11 +501,11 @@ class WorldView(QWidget):
 
     def _legend(self, p, s, info, world) -> None:
         rect = QRectF(12, 12, 250, 50)
-        p.setPen(QPen(c("border"), 1))
-        p.setBrush(c("surface", 232))
-        p.drawRoundedRect(rect, 10, 10)
-        p.setPen(c("text"))
-        p.setFont(font(9.4, 700))
+        p.setPen(QPen(c("border_strong"), 1))
+        p.setBrush(c("surface", 238))
+        p.drawRect(rect)
+        p.setPen(c("head"))
+        p.setFont(font(9.4, 600))
         plat = world.remote.platform.name
         p.drawText(rect.adjusted(12, 7, 0, 0), Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop,
                    f"{plat} · {info.name}")
@@ -525,9 +519,9 @@ class WorldView(QWidget):
     def _minimap(self, p, t, tpos, gaz, scol, world, cam) -> None:
         size = 132
         box = QRectF(self.W - size - 12, self.H - size - 12, size, size)
-        p.setPen(QPen(c("border"), 1))
-        p.setBrush(c("surface", 232))
-        p.drawRoundedRect(box, 12, 12)
+        p.setPen(QPen(c("border_strong"), 1))
+        p.setBrush(c("surface", 238))
+        p.drawRect(box)
         scale = (size / 2 - 12) / 3600.0
         o = QPointF(box.center().x(), box.bottom() - 18)
 
@@ -659,10 +653,10 @@ class WorldView(QWidget):
         a_is_sat = world.ground.space
         if a_is_sat:
             self._glow(p, station, 14, QColor(200, 220, 255), 150)
-            draw_platform(p, "satellite", station.x(), station.y(), 28, 0.0, QColor("#E8E4F5"))
+            draw_platform(p, "satellite", station.x(), station.y(), 28, 0.0, QColor("#FFFFFF"))
         else:
             p.setPen(Qt.PenStyle.NoPen)
-            p.setBrush(QColor("#E8E4F5"))
+            p.setBrush(QColor("#FFFFFF"))
             p.drawRect(QRectF(station.x() - 12, station.y() - 6, 24, 8))
             dome = QPainterPath()
             dome.moveTo(station.x() - 12, station.y() - 6)
@@ -671,7 +665,7 @@ class WorldView(QWidget):
             p.drawPath(dome)
         on = world.beacon.modulation(t) > 0.5
         self._glow(p, sat, 22 if on else 12, QColor(255, 236, 170), 220 if on else 90)
-        draw_platform(p, remote.info.platform, sat.x(), sat.y(), 34, 0.0, QColor("#F2EEFF"))
+        draw_platform(p, remote.info.platform, sat.x(), sat.y(), 34, 0.0, QColor("#FFFFFF"))
 
         az, el = direction_to_los(tpos[0] - cam[0], tpos[1] - cam[1], tpos[2] - cam[2])
         v = world.target_vel(t)
@@ -693,9 +687,9 @@ class WorldView(QWidget):
             bar = QRectF(16, H - 44, min(260, sky_w * 0.45), 8)
             p.setPen(Qt.PenStyle.NoPen)
             p.setBrush(QColor(255, 255, 255, 40))
-            p.drawRoundedRect(bar, 4, 4)
+            p.drawRect(bar)
             p.setBrush(c("accent"))
-            p.drawRoundedRect(QRectF(bar.left(), bar.top(), bar.width() * prog, bar.height()), 4, 4)
+            p.drawRect(QRectF(bar.left(), bar.top(), bar.width() * prog, bar.height()))
             p.setPen(QColor(230, 226, 245))
             p.setFont(font(8, 600))
             p.drawText(QPointF(bar.left(), bar.top() - 6), f"Pass progress {prog * 100:.0f} %  (rise → set)")
@@ -710,7 +704,7 @@ class WorldView(QWidget):
         box = QRectF(self.W - size - 12, 12, size, size + 16)
         p.setPen(QPen(QColor(255, 255, 255, 40), 1))
         p.setBrush(QColor(20, 22, 44, 220))
-        p.drawRoundedRect(box, 12, 12)
+        p.drawRect(box)
         ctr = QPointF(box.center().x(), box.top() + 16 + size / 2)
         R = size / 2 - 16
 

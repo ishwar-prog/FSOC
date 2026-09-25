@@ -8,7 +8,7 @@ from PySide6.QtCore import QPointF, QRectF, Qt
 from PySide6.QtGui import QColor, QPainter, QPen
 from PySide6.QtWidgets import QGraphicsEllipseItem, QVBoxLayout, QWidget
 
-from .theme import P, STATE_COLOR, c, font, mono
+from .theme import GRAD_PRIMARY, P, STATE_COLOR, c, font, grad, num
 
 pg.setConfigOptions(antialias=True, foreground=P["muted"], background=P["surface"])
 
@@ -113,7 +113,7 @@ class StateStrip(QWidget):
         x0 = 40
         p.setPen(Qt.PenStyle.NoPen)
         p.setBrush(c("surface_alt"))
-        p.drawRoundedRect(QRectF(x0, 2, w, h - 4), 4, 4)
+        p.drawRect(QRectF(x0, 2, w, h - 4))
         if len(self.t) < 2:
             return
         t1 = self.t[-1]
@@ -142,7 +142,7 @@ class ErrorTimeline(QWidget):
             self.plot.setMinimumHeight(90)
             self.plot.getPlotItem().getAxis("bottom").setStyle(showValues=False)
         band = pg.LinearRegionItem((0, 10), orientation="horizontal", movable=False,
-                                   brush=pg.mkBrush(QColor(88, 184, 145, 26)), pen=pg.mkPen(None))
+                                   brush=pg.mkBrush(QColor(8, 180, 77, 20)), pen=pg.mkPen(None))
         self.plot.addItem(band)
         thr = pg.InfiniteLine(pos=10, angle=0, pen=pg.mkPen(P["peach"], width=1.3, style=Qt.PenStyle.DashLine))
         self.plot.addItem(thr)
@@ -153,8 +153,8 @@ class ErrorTimeline(QWidget):
             self._thr_txt = txt
         else:
             self._thr_txt = None
-        self.point = self.plot.plot(pen=pg.mkPen(P["sky"], width=1.2), connect="finite")
-        self.err = self.plot.plot(pen=pg.mkPen(P["accent"], width=2.0), connect="finite")
+        self.point = self.plot.plot(pen=pg.mkPen(P["faint"], width=1.2), connect="finite")
+        self.err = self.plot.plot(pen=pg.mkPen(P["accent_ink"], width=2.0), connect="finite")
         lay.addWidget(self.plot, 1)
         self.strip = StateStrip()
         lay.addWidget(self.strip)
@@ -198,7 +198,7 @@ class Bullseye(QWidget):
         self.scatter = pg.ScatterPlotItem(size=6, pen=None)
         self.plot.addItem(self.scatter)
         self.label = pg.TextItem("", color=P["text"], anchor=(0, 0))
-        self.label.setFont(mono(8.5, 600))
+        self.label.setFont(num(8.5, 600))
         self.label.setPos(-R + 0.5, R - 0.5)
         self.plot.addItem(self.label)
         lay.addWidget(self.plot)
@@ -280,23 +280,23 @@ class LatencyBars(QWidget):
         cap = 1000.0 / total if total > 0 else 0
         p.drawText(QRectF(0, 0, w, 18), Qt.AlignmentFlag.AlignLeft,
                    f"End-to-end {total:.1f} ms / frame  ·  capacity {cap:.0f} FPS  ·  budget for 20 FPS = 50 ms")
-        bar = QRectF(0, 26, w, 18)
+        bar = QRectF(0, 26, w, 14)
         p.setPen(Qt.PenStyle.NoPen)
-        p.setBrush(c("surface_alt"))
-        p.drawRoundedRect(bar, 9, 9)
+        p.setBrush(c("border"))
+        p.drawRect(bar)
         x = 0.0
         for (key, name, col), v in zip(self.STAGES, self.vals):
             if not math.isfinite(v) or v <= 0:
                 continue
             ww = bar.width() * min(v, budget) / budget
             p.setBrush(c(col))
-            p.drawRoundedRect(QRectF(x, bar.top(), max(ww, 3), bar.height()), 6, 6)
+            p.drawRect(QRectF(x, bar.top(), max(ww, 3), bar.height()))
             x += ww
         lx = 0
         for (key, name, col), v in zip(self.STAGES, self.vals):
             p.setBrush(c(col))
             p.setPen(Qt.PenStyle.NoPen)
-            p.drawEllipse(QPointF(lx + 6, 64), 4.5, 4.5)
+            p.drawRect(QRectF(lx + 2, 60, 8, 8))
             p.setPen(c("text"))
             p.setFont(font(8.4, 500))
             txt = f"{name}  {v:.2f} ms" if math.isfinite(v) else name

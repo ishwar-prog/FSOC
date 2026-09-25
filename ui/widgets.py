@@ -1,4 +1,8 @@
-"""Reusable pastel widgets and vector icons (no image assets needed in the .exe)."""
+"""Reusable widgets and vector icons (no image assets needed in the .exe).
+
+Everything here is square-edged and hairline-bordered: shape carries no meaning, so
+the eye is free to follow colour, which only ever marks state.
+"""
 
 import math
 from typing import Callable, Dict, List, Optional
@@ -8,7 +12,8 @@ from PySide6.QtGui import QColor, QPainter, QPainterPath, QPen, QPolygonF
 from PySide6.QtWidgets import (QAbstractButton, QButtonGroup, QFrame, QHBoxLayout, QLabel, QPushButton,
                                QSizePolicy, QSlider, QToolTip, QVBoxLayout, QWidget)
 
-from .theme import HAZARD_COLOR, P, STATUS_COLOR, STATUS_TEXT, c, font, mono
+from .theme import (GRAD_PRIMARY, GRAD_SUCCESS, HAZARD_COLOR, P, STATUS_COLOR, STATUS_TEXT, UNIT, c, font,
+                    grad, grad_px, ink, num)
 
 
 def label(text: str = "", obj: Optional[str] = None, wrap: bool = False) -> QLabel:
@@ -30,9 +35,9 @@ class InfoButton(QLabel):
         self.setCursor(Qt.CursorShape.WhatsThisCursor)
         self.setToolTip(self._html)
         self.setStyleSheet(
-            f"QLabel {{ color: {P['muted']}; border: 1.3px solid {P['border_strong']}; border-radius: {size // 2}px;"
-            f" font-family: Georgia, serif; font-style: italic; font-weight: 700; font-size: 8pt; background: transparent; }}"
-            f"QLabel:hover {{ color: {P['accent']}; border-color: {P['accent']}; background: {P['accent_soft']}; }}")
+            f"QLabel {{ color: {P['faint']}; border: 1px solid {P['border_strong']};"
+            f" font-weight: 600; font-size: 7.5pt; background: transparent; }}"
+            f"QLabel:hover {{ color: {P['accent_ink']}; border-color: {P['accent']}; background: {P['accent_soft']}; }}")
 
     def enterEvent(self, e) -> None:
         QToolTip.showText(self.mapToGlobal(QPoint(0, self.height() + 4)), self._html, self)
@@ -40,18 +45,18 @@ class InfoButton(QLabel):
 
 
 class Card(QFrame):
-    def __init__(self, title: str = "", subtitle: str = "", parent=None, pad: int = 16, spacing: int = 12,
+    def __init__(self, title: str = "", subtitle: str = "", parent=None, pad: int = UNIT * 2, spacing: int = UNIT,
                  obj: str = "card", info: Optional[str] = None) -> None:
         super().__init__(parent)
         self.setObjectName(obj)
         lay = QVBoxLayout(self)
-        lay.setContentsMargins(pad, pad - 2, pad, pad)
+        lay.setContentsMargins(pad, pad, pad, pad)
         lay.setSpacing(spacing)
         self.header = QHBoxLayout()
         self.header.setSpacing(8)
         if title:
             tbox = QVBoxLayout()
-            tbox.setSpacing(1)
+            tbox.setSpacing(2)
             trow = QHBoxLayout()
             trow.setSpacing(6)
             self.title_label = label(title, "h2")
@@ -81,13 +86,11 @@ class Pill(QLabel):
         if getattr(self, "_key", None) == tone:
             return
         self._key = tone
-        fg = P.get(tone, tone)
+        fg = P.get(tone + "_ink", P.get(tone, tone))
         bg = P.get(tone + "_soft", P["surface_alt"])
-        if tone == "faint":
-            bg, fg = P["surface_alt"], P["muted"]
         self.setStyleSheet(
-            f"QLabel {{ background: {bg}; color: {fg}; border-radius: 10px; padding: 3px 10px;"
-            f" font-weight: 700; font-size: {self._size}pt; letter-spacing: 0.4px; }}")
+            f"QLabel {{ background: {bg}; color: {fg}; padding: 3px 8px;"
+            f" font-weight: 600; font-size: {self._size}pt; letter-spacing: 1.0px; }}")
 
 
 class Switch(QAbstractButton):
@@ -96,7 +99,7 @@ class Switch(QAbstractButton):
         self.setCheckable(True)
         self.setCursor(Qt.CursorShape.PointingHandCursor)
         self._pos = 0.0
-        self._color = QColor(color or P["accent"])
+        self._color = QColor(color or P["accent_ink"])
         self._anim = QVariantAnimation(self, duration=180, easingCurve=QEasingCurve.Type.OutCubic)
         self._anim.valueChanged.connect(self._on_anim)
         self.toggled.connect(self._animate)
@@ -122,27 +125,27 @@ class Switch(QAbstractButton):
     def paintEvent(self, e) -> None:
         p = QPainter(self)
         p.setRenderHint(QPainter.RenderHint.Antialiasing)
-        r = QRectF(1, 2, 36, 18)
+        r = QRectF(1, 4, 36, 16)
         off, on = QColor(P["border_strong"]), self._color
         col = QColor(int(off.red() + (on.red() - off.red()) * self._pos),
                      int(off.green() + (on.green() - off.green()) * self._pos),
                      int(off.blue() + (on.blue() - off.blue()) * self._pos))
         p.setPen(Qt.PenStyle.NoPen)
         p.setBrush(col)
-        p.drawRoundedRect(r, 9, 9)
+        p.drawRect(r)
         p.setBrush(QColor("white"))
-        p.drawEllipse(QPointF(r.left() + 9 + self._pos * 18, r.center().y()), 7, 7)
+        p.drawRect(QRectF(r.left() + 2 + self._pos * 18, r.top() + 2, 14, 12))
 
 
 class Segmented(QWidget):
     changed = Signal(str)
 
-    def __init__(self, options: List[tuple], parent=None, compact: bool = False) -> None:
+    def __init__(self, options: List[tuple], parent=None, compact: bool = False, tabs: bool = False) -> None:
         super().__init__(parent)
         self.setObjectName("segmented")
         lay = QHBoxLayout(self)
-        lay.setContentsMargins(3, 3, 3, 3)
-        lay.setSpacing(2)
+        lay.setContentsMargins(1, 1, 1, 1)
+        lay.setSpacing(1)
         self.group = QButtonGroup(self)
         self.group.setExclusive(True)
         self.buttons: Dict[str, QPushButton] = {}
@@ -156,12 +159,24 @@ class Segmented(QWidget):
             lay.addWidget(b)
             self.buttons[key] = b
         pad = "5px 9px" if compact else "6px 14px"
+        if tabs:
+            self.setStyleSheet(
+                f"QWidget#segmented {{ background: transparent; border: none;"
+                f" border-bottom: 1px solid {P['border_strong']}; }}"
+                f"QPushButton#seg {{ background: transparent; border: none; border-bottom: 2px solid transparent;"
+                f" padding: 7px 12px; color: {P['muted']}; font-weight: 500; }}"
+                f"QPushButton#seg:hover {{ color: {P['head']}; }}"
+                f"QPushButton#seg:checked {{ color: {P['head']}; font-weight: 600;"
+                f" border-bottom: 2px solid {P['accent']}; }}")
+            if options:
+                self.set_current(options[0][0])
+            return
         self.setStyleSheet(
-            f"QWidget#segmented {{ background: {P['surface_alt']}; border: 1px solid {P['border']}; border-radius: 11px; }}"
-            f"QPushButton#seg {{ background: transparent; border: none; border-radius: 8px; padding: {pad};"
-            f" color: {P['muted']}; font-weight: 600; }}"
-            f"QPushButton#seg:hover {{ color: {P['text']}; }}"
-            f"QPushButton#seg:checked {{ background: {P['surface']}; color: {P['text']};"
+            f"QWidget#segmented {{ background: {P['surface_alt']}; border: 1px solid {P['border']}; }}"
+            f"QPushButton#seg {{ background: transparent; border: none; padding: {pad};"
+            f" color: {P['muted']}; font-weight: 500; }}"
+            f"QPushButton#seg:hover {{ color: {P['head']}; }}"
+            f"QPushButton#seg:checked {{ background: {P['surface']}; color: {P['head']}; font-weight: 600;"
             f" border: 1px solid {P['border_strong']}; }}")
         if options:
             self.set_current(options[0][0])
@@ -190,7 +205,7 @@ class ValueSlider(QWidget):
             top.addWidget(InfoButton(info, size=15))
         top.addStretch(1)
         self.value_label = QLabel(self.fmt(value))
-        self.value_label.setFont(mono(9, 600))
+        self.value_label.setFont(num(9, 600))
         top.addWidget(self.value_label)
         v.addLayout(top)
         self.slider = QSlider(Qt.Orientation.Horizontal)
@@ -221,7 +236,7 @@ class Gauge(QWidget):
         super().__init__(parent)
         self.SPAN = span
         self.marker = marker
-        self.setFixedHeight(8)
+        self.setFixedHeight(6)
         self._ratio = 0.0
         self._tone = "faint"
         self._anim = QVariantAnimation(self, duration=350, easingCurve=QEasingCurve.Type.OutCubic)
@@ -248,38 +263,44 @@ class Gauge(QWidget):
         w, h = self.width(), self.height()
         p.setPen(Qt.PenStyle.NoPen)
         p.setBrush(c("border"))
-        p.drawRoundedRect(QRectF(0, 0, w, h), h / 2, h / 2)
+        p.drawRect(QRectF(0, 0, w, h))
         fw = w * self._ratio / self.SPAN
         if fw > 1:
-            p.setBrush(c(self._tone))
-            p.drawRoundedRect(QRectF(0, 0, fw, h), h / 2, h / 2)
+            if self._tone == "mint":
+                p.setBrush(grad_px(GRAD_SUCCESS, 0, w))
+            elif self._tone in ("sky", "accent"):
+                p.setBrush(grad_px(GRAD_PRIMARY, 0, w))
+            else:
+                p.setBrush(c(self._tone))
+            p.drawRect(QRectF(0, 0, fw, h))
         if self.marker:
             x = w / self.SPAN
-            p.setBrush(c("text", 150))
-            p.drawRoundedRect(QRectF(x - 1, -1, 2, h + 2), 1, 1)
+            p.setBrush(c("head"))
+            p.drawRect(QRectF(x - 1, -2, 1, h + 4))
 
 
 class KpiCard(QFrame):
     def __init__(self, name: str, target: str, meaning: str, info: Optional[str] = None, parent=None) -> None:
         super().__init__(parent)
-        self.setObjectName("softCard")
+        self.setObjectName("row")
         lay = QVBoxLayout(self)
-        lay.setContentsMargins(14, 10, 14, 12)
-        lay.setSpacing(5)
+        lay.setContentsMargins(0, UNIT + 2, 0, UNIT + 2)
+        lay.setSpacing(6)
         top = QHBoxLayout()
         top.setSpacing(6)
         self.name = label(name, "h2")
-        self.name.setStyleSheet("font-size: 10pt;")
+        self.name.setStyleSheet("font-size: 10pt; font-weight: 600;")
         top.addWidget(self.name)
         if info:
             top.addWidget(InfoButton(info, size=15))
         top.addStretch(1)
-        self.pill = Pill("LIVE", "sky", size=7.8)
+        self.pill = Pill("LIVE", "sky", size=7.5)
         top.addWidget(self.pill)
         lay.addLayout(top)
         mid = QHBoxLayout()
         self.value = QLabel("—")
-        self.value.setFont(font(17, 650))
+        self.value.setFont(num(16, 600))
+        self.value.setStyleSheet(f"color: {P['head']};")
         self.target = label(f"target {target}", "caption")
         mid.addWidget(self.value)
         mid.addStretch(1)
@@ -315,7 +336,7 @@ class StatRow(QWidget):
             lay.addWidget(InfoButton(info, size=14))
         lay.addStretch(1)
         self.value = QLabel(value)
-        self.value.setFont(mono(9.5, 600))
+        self.value.setFont(num(10, 600))
         self.value.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
         lay.addWidget(self.value)
 
@@ -344,7 +365,7 @@ class SourceBars(QWidget):
         w = self.width()
         if not self.rows:
             p.setPen(c("faint"))
-            p.setFont(font(8.6))
+            p.setFont(font(9))
             p.drawText(QRectF(0, 0, w, 40), Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter,
                        "Watching lights… (needs ~1 s of history each)")
             return
@@ -352,20 +373,20 @@ class SourceBars(QWidget):
             y = 4 + i * 23
             tone = "mint" if locked else ("sky" if prob >= 0.6 else "faint")
             p.setPen(Qt.PenStyle.NoPen)
-            p.setBrush(c(tone))
-            p.drawEllipse(QPointF(6, y + 8), 4, 4)
-            p.setPen(c("text"))
-            p.setFont(font(8.6, 650 if locked else 500))
+            p.setBrush(ink(tone) if tone != "faint" else c("faint"))
+            p.drawRect(QRectF(3, y + 5, 6, 6))
+            p.setPen(c("head") if locked else c("text"))
+            p.setFont(font(9, 600 if locked else 400))
             name = "Locked beacon" if locked else f"Light {i + 1}"
             p.drawText(QRectF(16, y, 104, 16), Qt.AlignmentFlag.AlignVCenter, name)
             bx, bw = 118, max(40, w - 118 - 92)
             p.setPen(Qt.PenStyle.NoPen)
             p.setBrush(c("border"))
-            p.drawRoundedRect(QRectF(bx, y + 4, bw, 8), 4, 4)
-            p.setBrush(c(tone))
-            p.drawRoundedRect(QRectF(bx, y + 4, max(3, bw * prob), 8), 4, 4)
+            p.drawRect(QRectF(bx, y + 5, bw, 6))
+            p.setBrush(grad_px(GRAD_SUCCESS, bx, bx + bw) if tone == "mint" else c(tone))
+            p.drawRect(QRectF(bx, y + 5, max(3, bw * prob), 6))
             p.setPen(c("muted"))
-            p.setFont(mono(8.2, 600))
+            p.setFont(num(8.5, 600))
             p.drawText(QRectF(bx + bw + 6, y, 86, 16), Qt.AlignmentFlag.AlignVCenter,
                        f"{prob * 100:3.0f}% {freq:4.1f}Hz")
 
@@ -529,10 +550,10 @@ class IconBadge(QWidget):
         r = QRectF(self.rect()).adjusted(1, 1, -1, -1)
         col = QColor(HAZARD_COLOR[self.key])
         bg = QColor(col)
-        bg.setAlpha(50 if self.active else 26)
-        p.setPen(Qt.PenStyle.NoPen)
+        bg.setAlpha(46 if self.active else 18)
+        p.setPen(QPen(col if self.active else c("border"), 1))
         p.setBrush(bg)
-        p.drawRoundedRect(r, 10, 10)
+        p.drawRect(r)
         draw_hazard(p, self.key, r.adjusted(4, 4, -4, -4), col if self.active else c("faint"))
 
 
@@ -554,9 +575,9 @@ class _Tile(QAbstractButton):
     def _frame(self, p: QPainter) -> QRectF:
         r = QRectF(self.rect()).adjusted(1, 1, -1, -1)
         on = self.isChecked()
-        p.setPen(QPen(c("accent") if on else (c("border_strong") if self._hover else c("border")), 1.4 if on else 1))
-        p.setBrush(c("accent_soft") if on else (c("surface_alt") if self._hover else c("surface")))
-        p.drawRoundedRect(r, 11, 11)
+        p.setPen(QPen(c("accent") if on else (c("border_strong") if self._hover else c("border")), 1))
+        p.setBrush(c("accent_soft") if on else (c("bg") if self._hover else c("surface")))
+        p.drawRect(r)
         return r
 
 
@@ -578,10 +599,11 @@ class PatternTile(_Tile):
         ic = QRectF(r.left() + 8, r.center().y() - 14, 28, 28)
         p.setPen(Qt.PenStyle.NoPen)
         p.setBrush(c("surface") if on else c("surface_alt"))
-        p.drawRoundedRect(ic, 8, 8)
+        p.drawRect(ic)
         glyph = "manual" if self.key.startswith("manual") else self.platform
         if glyph == "manual":
-            p.setPen(QPen(c("accent") if on else c("muted"), 1.8, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap))
+            p.setPen(QPen(c("accent_ink") if on else c("muted"), 1.8, Qt.PenStyle.SolidLine,
+                          Qt.PenCapStyle.RoundCap))
             ctr = ic.center()
             for a in (0, 90, 180, 270):
                 rad = math.radians(a)
@@ -589,9 +611,10 @@ class PatternTile(_Tile):
                 p.drawLine(ctr, tip)
             p.drawEllipse(ctr, 3, 3)
         else:
-            draw_platform(p, glyph, ic.center().x(), ic.center().y(), 19, 0.0, c("accent") if on else c("muted"))
-        p.setPen(c("text"))
-        p.setFont(font(9.0, 650 if on else 550))
+            draw_platform(p, glyph, ic.center().x(), ic.center().y(), 19, 0.0,
+                          c("accent_ink") if on else c("muted"))
+        p.setPen(c("head") if on else c("text"))
+        p.setFont(font(9.0, 600 if on else 400))
         tr = QRectF(ic.right() + 8, r.top(), r.right() - ic.right() - 10, r.height())
         p.drawText(tr, Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft | Qt.TextFlag.TextWordWrap, self.name)
 
@@ -613,8 +636,76 @@ class IconTile(_Tile):
         p.setRenderHint(QPainter.RenderHint.Antialiasing)
         r = self._frame(p)
         on = self.isChecked()
-        draw_platform(p, self.glyph, r.center().x(), r.top() + 26, 28, 0.0, c("accent") if on else c("muted"))
-        p.setPen(c("text"))
-        p.setFont(font(8.6, 650 if on else 500))
+        draw_platform(p, self.glyph, r.center().x(), r.top() + 26, 28, 0.0,
+                      c("accent_ink") if on else c("muted"))
+        p.setPen(c("head") if on else c("text"))
+        p.setFont(font(8.8, 600 if on else 400))
         p.drawText(QRectF(r.left() + 2, r.bottom() - 26, r.width() - 4, 22),
                    Qt.AlignmentFlag.AlignCenter | Qt.TextFlag.TextWordWrap, self.name)
+
+
+class TabBar(QWidget):
+    """Page tabs: a text row with a gradient rule under the active item."""
+    changed = Signal(str)
+
+    PAD = 14
+
+    def __init__(self, items: List[tuple], parent=None) -> None:
+        super().__init__(parent)
+        self.items = items
+        self.current = items[0][0] if items else ""
+        self._hover = -1
+        self.setMouseTracking(True)
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.setFixedHeight(40)
+        self.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
+        self.setFixedWidth(sum(self._widths()))
+
+    def _widths(self) -> List[int]:
+        fm = self.fontMetrics()
+        return [fm.horizontalAdvance(text) + self.PAD * 2 for _k, text in self.items]
+
+    def set_current(self, key: str) -> None:
+        if key != self.current and any(k == key for k, _t in self.items):
+            self.current = key
+            self.update()
+
+    def _hit(self, x: float) -> int:
+        acc = 0
+        for i, w in enumerate(self._widths()):
+            if acc <= x < acc + w:
+                return i
+            acc += w
+        return -1
+
+    def mouseMoveEvent(self, e) -> None:
+        i = self._hit(e.position().x())
+        if i != self._hover:
+            self._hover = i
+            self.update()
+
+    def leaveEvent(self, e) -> None:
+        self._hover = -1
+        self.update()
+
+    def mousePressEvent(self, e) -> None:
+        i = self._hit(e.position().x())
+        if i >= 0 and self.items[i][0] != self.current:
+            self.current = self.items[i][0]
+            self.update()
+            self.changed.emit(self.current)
+
+    def paintEvent(self, e) -> None:
+        p = QPainter(self)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        h, x = self.height(), 0
+        for i, ((key, text), w) in enumerate(zip(self.items, self._widths())):
+            on = key == self.current
+            p.setFont(font(10.5, 600 if on else 400))
+            p.setPen(c("head") if on else (c("text") if i == self._hover else c("muted")))
+            p.drawText(QRectF(x, 0, w, h - 3), Qt.AlignmentFlag.AlignCenter, text)
+            if on:
+                p.setPen(Qt.PenStyle.NoPen)
+                p.setBrush(grad(GRAD_SUCCESS))
+                p.drawRect(QRectF(x, h - 2, w, 2))
+            x += w

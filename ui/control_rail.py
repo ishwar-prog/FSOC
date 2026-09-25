@@ -52,7 +52,7 @@ class HazardRow(QFrame):
         nrow = QHBoxLayout()
         nrow.setSpacing(5)
         name = label(info.name, "h2")
-        name.setStyleSheet("font-size: 9.6pt;")
+        name.setStyleSheet("font-size: 9.5pt; font-weight: 500;")
         nrow.addWidget(name)
         nrow.addWidget(InfoButton(f"<b>{info.name}</b><br>{info.summary}", size=14))
         nrow.addStretch(1)
@@ -69,8 +69,8 @@ class HazardRow(QFrame):
         self.slider.setRange(5, 100)
         self.slider.setValue(int(level * 100))
         self.slider.setStyleSheet(
-            f"QSlider::sub-page:horizontal {{ background: {HAZARD_COLOR[info.key]}; border-radius: 2px; }}"
-            f"QSlider::handle:horizontal {{ border-color: {HAZARD_COLOR[info.key]}; }}")
+            f"QSlider::sub-page:horizontal {{ background: {HAZARD_COLOR[info.key]}; }}"
+            f"QSlider::handle:horizontal {{ background: {HAZARD_COLOR[info.key]}; }}")
         self.val = label(f"{int(level * 100)} %", "caption")
         self.val.setFixedWidth(40)
         self.val.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
@@ -88,8 +88,9 @@ class HazardRow(QFrame):
         self.switch.toggled.connect(self._on_toggle)
 
     def _style(self, on: bool) -> None:
-        self.setStyleSheet(f"QFrame#hazRow {{ background: {P['surface_alt'] if on else 'transparent'};"
-                           f" border-radius: 10px; }}")
+        self.setStyleSheet(
+            f"QFrame#hazRow {{ background: {P['surface_alt'] if on else 'transparent'};"
+            f" border-left: 2px solid {P['accent'] if on else 'transparent'}; }}")
 
     def _on_toggle(self, on: bool) -> None:
         self.badge.active = on
@@ -118,8 +119,9 @@ class ControlRail(QWidget):
         self._rev = -1
         v = QVBoxLayout(self)
         v.setContentsMargins(0, 0, 0, 0)
-        v.setSpacing(10)
-        self.tabs = Segmented([("remote", "Remote B"), ("ground", "Ground A"), ("env", "Environment")], compact=True)
+        v.setSpacing(0)
+        self.tabs = Segmented([("remote", "Remote B"), ("ground", "Ground A"), ("env", "Environment")],
+                              compact=True, tabs=True)
         v.addWidget(self.tabs)
         self.stack = QStackedWidget()
         v.addWidget(self.stack, 1)

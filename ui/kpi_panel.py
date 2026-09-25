@@ -23,13 +23,13 @@ class KpiPanel(QScrollArea):
         self.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         inner = QWidget()
         col = QVBoxLayout(inner)
-        col.setContentsMargins(6, 0, 0, 0)
-        col.setSpacing(12)
+        col.setContentsMargins(8, 8, 8, 8)
+        col.setSpacing(8)
 
         card = Card("Mission targets", "SIH26169 reference numbers · scored live", info=tip("targets"))
         self.summary = Pill("0 / 6", "faint")
         card.header.addWidget(self.summary, 0, Qt.AlignmentFlag.AlignTop)
-        card.body.setSpacing(8)
+        card.body.setSpacing(0)
         self.cards = {}
         for key in KPI_ORDER:
             name, target, meaning = KPI_META[key]

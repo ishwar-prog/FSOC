@@ -34,7 +34,7 @@ class StatTile(QFrame):
         v.setSpacing(2)
         v.addWidget(label(name, "caption"))
         self.value = label("—", "h1")
-        self.value.setStyleSheet("font-size: 14pt;")
+        self.value.setStyleSheet(f"font-size: 15pt; font-weight: 600; color: {P['head']};")
         v.addWidget(self.value)
 
     def set(self, text: str) -> None:
@@ -73,7 +73,7 @@ class AnalyticsPage(QScrollArea):
         grid = QGridLayout()
         grid.setHorizontalSpacing(16)
         grid.setVerticalSpacing(16)
-        c1 = Card("Tracking error over time", "Centroid error (lavender) vs 10 px target · pointing error (blue) · "
+        c1 = Card("Tracking error over time", "Centroid error (blue) vs 10 px target · pointing error (grey) · "
                                               "state band below", info=tip("timeline"))
         self.timeline = ErrorTimeline(30.0)
         self.timeline.setMinimumHeight(250)

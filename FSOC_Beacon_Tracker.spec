@@ -22,7 +22,7 @@ a = Analysis(
     ["main.py"],
     pathex=[os.path.abspath(".")],
     binaries=[],
-    datas=[],
+    datas=[("assets/fonts", "assets/fonts")],
     hiddenimports=[],
     hookspath=[],
     hooksconfig={},
