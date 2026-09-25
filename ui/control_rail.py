@@ -6,14 +6,15 @@ import sys
 
 from PySide6.QtCore import QEasingCurve, QPropertyAnimation, Qt, Signal
 from PySide6.QtWidgets import (QButtonGroup, QFileDialog, QFrame, QGridLayout, QHBoxLayout, QPushButton,
-                               QScrollArea, QSlider, QStackedWidget, QVBoxLayout, QWidget)
+                               QScrollArea, QStackedWidget, QVBoxLayout, QWidget)
 
 from fsoc.sim.hazards import HAZARD_INFOS
 from fsoc.sim.patterns import PATTERN_INFOS
 from fsoc.sim.terminals import AERIAL_CENTER, MOUNTS, PLATFORMS
 from .info_text import tip
 from .theme import HAZARD_COLOR, P
-from .widgets import Card, IconBadge, IconTile, InfoButton, PatternTile, Segmented, Switch, ValueSlider, label
+from .widgets import (Card, IconBadge, IconTile, InfoButton, PatternTile, Segmented, Slider, Switch,
+                      ValueSlider, label)
 
 HAZARD_SHORT = {
     "fog": "Visibility down to 2 km", "rain": "Streaks, drops, attenuation",
@@ -65,7 +66,7 @@ class HazardRow(QFrame):
         self.slider_box = QWidget()
         hl = QHBoxLayout(self.slider_box)
         hl.setContentsMargins(42, 2, 2, 2)
-        self.slider = QSlider(Qt.Orientation.Horizontal)
+        self.slider = Slider(Qt.Orientation.Horizontal)
         self.slider.setRange(5, 100)
         self.slider.setValue(int(level * 100))
         self.slider.setStyleSheet(

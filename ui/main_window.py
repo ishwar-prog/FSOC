@@ -16,7 +16,7 @@ from .control_rail import ControlRail
 from .info_text import tip
 from .kpi_panel import KpiPanel
 from .theme import P, STATE_COLOR, UNIT, num
-from .widgets import Card, Pill, StatRow, TabBar, label
+from .widgets import Card, GridCanvas, Pill, StatRow, TabBar, label
 from .world_view import WorldView
 
 DEG = math.pi / 180.0
@@ -85,8 +85,7 @@ class MainWindow(QMainWindow):
 
     # ================================================================ build
     def _build(self) -> None:
-        root = QWidget()
-        root.setObjectName("root")
+        root = GridCanvas()
         v = QVBoxLayout(root)
         v.setContentsMargins(0, 0, 0, 0)
         v.setSpacing(0)

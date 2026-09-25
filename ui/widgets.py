@@ -8,12 +8,73 @@ import math
 from typing import Callable, Dict, List, Optional
 
 from PySide6.QtCore import QEasingCurve, QPoint, QPointF, QRectF, QSize, Qt, QVariantAnimation, Signal
-from PySide6.QtGui import QColor, QPainter, QPainterPath, QPen, QPolygonF
-from PySide6.QtWidgets import (QAbstractButton, QButtonGroup, QFrame, QHBoxLayout, QLabel, QPushButton,
-                               QSizePolicy, QSlider, QToolTip, QVBoxLayout, QWidget)
+from PySide6.QtGui import QBrush, QColor, QPainter, QPainterPath, QPen, QPixmap, QPolygonF
+from PySide6.QtWidgets import (QAbstractButton, QAbstractScrollArea, QApplication, QButtonGroup, QFrame,
+                               QHBoxLayout, QLabel, QPushButton, QSizePolicy, QSlider, QToolTip, QVBoxLayout,
+                               QWidget)
 
 from .theme import (GRAD_PRIMARY, GRAD_SUCCESS, HAZARD_COLOR, P, STATUS_COLOR, STATUS_TEXT, UNIT, c, font,
                     grad, grad_px, ink, num)
+
+
+class Slider(QSlider):
+    """A slider that ignores the wheel until it is focused.
+
+    Panels here scroll, and a slider that reacts to a passing wheel changes a setting
+    the user never meant to touch. Click it (or tab to it) first, then the wheel works.
+    """
+
+    def __init__(self, orientation=Qt.Orientation.Horizontal, parent=None) -> None:
+        super().__init__(orientation, parent)
+        self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
+
+    def wheelEvent(self, e) -> None:
+        if self.hasFocus():
+            super().wheelEvent(e)
+            return
+        # An ignored wheel event does not reliably reach the panel, so hand it over.
+        w = self.parentWidget()
+        while w is not None and not isinstance(w, QAbstractScrollArea):
+            w = w.parentWidget()
+        if w is not None:
+            QApplication.sendEvent(w.viewport(), e)
+        else:
+            e.ignore()
+
+    def focusOutEvent(self, e) -> None:
+        self.clearFocus()
+        super().focusOutEvent(e)
+
+
+class GridCanvas(QWidget):
+    """App background: the flat canvas tone with a faint engineering grid for texture."""
+
+    STEP = 8
+
+    def __init__(self, parent=None) -> None:
+        super().__init__(parent)
+        self.setObjectName("root")
+        self._tile = None
+        self._dpr = 0.0
+
+    def _brush(self) -> QBrush:
+        dpr = self.devicePixelRatioF()
+        if self._tile is None or dpr != self._dpr:
+            self._dpr = dpr
+            step = self.STEP
+            pm = QPixmap(int(step * dpr), int(step * dpr))
+            pm.setDevicePixelRatio(dpr)
+            pm.fill(c("bg"))
+            p = QPainter(pm)
+            p.setPen(QPen(c("head", 12), 1))
+            p.drawLine(QPointF(0, step - 0.5), QPointF(step, step - 0.5))
+            p.drawLine(QPointF(step - 0.5, 0), QPointF(step - 0.5, step))
+            p.end()
+            self._tile = QBrush(pm)
+        return self._tile
+
+    def paintEvent(self, e) -> None:
+        QPainter(self).fillRect(self.rect(), self._brush())
 
 
 def label(text: str = "", obj: Optional[str] = None, wrap: bool = False) -> QLabel:
@@ -208,7 +269,7 @@ class ValueSlider(QWidget):
         self.value_label.setFont(num(9, 600))
         top.addWidget(self.value_label)
         v.addLayout(top)
-        self.slider = QSlider(Qt.Orientation.Horizontal)
+        self.slider = Slider(Qt.Orientation.Horizontal)
         self.slider.setRange(0, int(round((hi - lo) / step)))
         self.slider.setValue(int(round((value - lo) / step)))
         self.slider.valueChanged.connect(self._on)
