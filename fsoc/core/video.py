@@ -107,6 +107,13 @@ class VideoBeaconDetector(BeaconDetector):
     # distinct light (an LED in front of a lit wall), not the same object at a coarser scale.
     # Off by default: the recorded-video results were validated without it.
     KEEP_EMBEDDED = False
+    # One light, one detection. A close, saturated beacon is found as several fragments (edge
+    # pieces at full resolution, the whole blob at 1/4 scale) whose centres differ by pixels and
+    # which trade places frame to frame — the track hops between them and its blink history is
+    # lost with every hop. When set, each light's bright region is traced on the full image, the
+    # fragments inside it are folded into one, and its centre is the region's own centroid.
+    # Off by default: the recorded-video results were validated without it.
+    CONSOLIDATE = False
     MAX_MOTION_BLOBS = 10
 
     STRONG_SNR = 12.0                  # a bright detection this good needs no help from motion
@@ -234,15 +241,74 @@ class VideoBeaconDetector(BeaconDetector):
             if all(self._distinct(c, k, r_new) for k in kept):
                 kept.append(c)
         del kept[self.max_candidates:]
+        if self.CONSOLIDATE:
+            kept = self._consolidate(gray, kept)
         res.candidates = kept
+
+    def _consolidate(self, gray: np.ndarray, cands: List[Candidate]) -> List[Candidate]:
+        out: List[Candidate] = []
+        regions = []                                  # (x0, y0, mask) of each light already kept
+        for c in cands:                               # strongest first
+            if any(self._inside(c, reg) for reg in regions):
+                continue                              # a fragment of a light already kept
+            if c.area < 20:
+                out.append(c)
+                continue
+            got = self._region(gray, c)
+            if got is None:
+                out.append(c)
+                continue
+            out.append(got[0])
+            regions.append(got[1])
+        return out
+
+    @staticmethod
+    def _inside(c: Candidate, reg) -> bool:
+        x0, y0, mask = reg
+        ix, iy = int(round(c.x)) - x0, int(round(c.y)) - y0
+        h, w = mask.shape
+        return bool(mask[max(0, iy - 3):min(h, iy + 4), max(0, ix - 3):min(w, ix + 4)].any())
+
+    @staticmethod
+    def _region(gray: np.ndarray, c: Candidate):
+        """The light's bright region: connected pixels above half-maximum, holding the peak.
+        The window grows until the region no longer touches its border."""
+        h, w = gray.shape[:2]
+        r = int(max(8, 1.3 * math.sqrt(c.area)))
+        while True:
+            x0, y0 = max(0, int(c.x) - r), max(0, int(c.y) - r)
+            x1, y1 = min(w, int(c.x) + r + 1), min(h, int(c.y) + r + 1)
+            patch = gray[y0:y1, x0:x1].astype(np.float32)
+            bg, pk = float(np.percentile(patch, 20)), float(patch.max())
+            if pk - bg < 8.0:
+                return None
+            thr = bg + 0.5 * (pk - bg)
+            _n, lab = cv2.connectedComponents((patch >= thr).astype(np.uint8), connectivity=8)
+            py, px = np.unravel_index(int(np.argmax(patch)), patch.shape)
+            mask = lab == lab[py, px]
+            touches = (mask[0].any() and y0 > 0) or (mask[-1].any() and y1 < h)                 or (mask[:, 0].any() and x0 > 0) or (mask[:, -1].any() and x1 < w)
+            if not touches or r >= 200:
+                break
+            r *= 2
+        wgt = mask * (patch - thr)
+        tot = float(wgt.sum())
+        if tot <= 0:
+            return None
+        ys, xs = np.mgrid[0:patch.shape[0], 0:patch.shape[1]]
+        cx = x0 + float((wgt * xs).sum()) / tot
+        cy = y0 + float((wgt * ys).sum()) / tot
+        area = float(mask.sum())
+        flux = float((mask * (patch - bg)).sum())
+        return Candidate(cx, cy, c.snr, flux, pk, area, c.elongation), (x0, y0, mask)
 
     def _distinct(self, c: Candidate, k: Candidate, r_new: float) -> bool:
         d = math.hypot(c.x - k.x, c.y - k.y)
         rk = math.sqrt(max(k.area, 1))
         if d > max(self.MERGE_PX, r_new + 0.6 * rk):
             return True
+        # k must not be saturated itself: then c is a hot spot in the same light's own glow
         return (self.KEEP_EMBEDDED and c.area <= 0.1 * k.area and c.peak > 1.5 * k.peak
-                and d > max(self.MERGE_PX, 0.3 * rk))
+                and k.peak < 150.0 and d > max(self.MERGE_PX, 0.3 * rk))
 
     def detect(self, image: np.ndarray, roi: Optional[Tuple[int, int, int, int]] = None) -> DetectionResult:
         gray = image if image.ndim == 2 else cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)

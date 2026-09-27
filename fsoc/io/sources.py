@@ -114,6 +114,24 @@ class LiveCameraSource(FrameSource):
                 self._n += 1
                 self._latest = (gray, t, self._n)
 
+    def lock_exposure(self) -> None:
+        """Freeze auto-exposure at its current setting. A close blinking LED otherwise makes the
+        camera brighten and darken the whole scene in time with it — every light then looks like
+        it blinks, and the beacon's own blink is squashed."""
+        try:
+            exp = self.cap.get(cv2.CAP_PROP_EXPOSURE)
+            self.cap.set(cv2.CAP_PROP_AUTO_EXPOSURE, 0.25)          # DirectShow: manual
+            self.cap.set(cv2.CAP_PROP_EXPOSURE, exp)
+            self.cap.set(cv2.CAP_PROP_AUTO_WB, 0)
+        except cv2.error:
+            pass
+
+    def unlock_exposure(self) -> None:
+        try:
+            self.cap.set(cv2.CAP_PROP_AUTO_EXPOSURE, 0.75)
+        except cv2.error:
+            pass
+
     def latest(self, now: Optional[float] = None) -> Optional[Tuple[np.ndarray, float, int]]:
         """Newest frame not handed out before: (grey image, age in seconds, frame number)."""
         with self._lock:

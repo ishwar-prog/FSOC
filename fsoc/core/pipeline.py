@@ -91,6 +91,12 @@ class PipelineConfig:
     steady_accept_s: float = 3.0
     min_blink_depth: float = 0.6       # an on/off beacon (photometry is background-subtracted)
     min_blink_hits: int = 8
+    # Detect in a window around the prediction while locked (False: whole frame every frame —
+    # affordable at webcam resolution, and a close beacon can be larger than any window).
+    use_roi: bool = True
+    # Extra centroid noise per pixel of blob size: a large, saturated light's centre is less
+    # certain than a point's. 0 keeps the point-source model.
+    size_noise: float = 0.0
 
 
 @dataclass
@@ -264,10 +270,16 @@ class TrackingPipeline:
             los = []
             for c in det.candidates:
                 az, el = pixel_to_los(c.x, c.y, frame.gimbal_az, frame.gimbal_el, K)
-                sig_px = 0.25 + 2.0 / math.sqrt(max(c.snr, 1.0))
+                sig_px = 0.25 + 2.0 / math.sqrt(max(c.snr, 1.0)) + self.cfg.size_noise * math.sqrt(max(c.area, 1.0))
                 los.append((c, az, el, (sig_px / K.fx) ** 2))
             gimg = frame.image if frame.image.ndim == 2 else frame.image[..., 1]
             self._assign = self.identifier.update(t, gimg, frame.gimbal_az, frame.gimbal_el, los)
+            mg = self.identifier.merged
+            if mg:                                   # duplicates of one light were folded together
+                if self._lock_tid in mg:
+                    self._lock_tid = mg[self._lock_tid]
+                for h in self._hyps:
+                    h.tid = mg.get(h.tid, h.tid)
             dt = (t - self._last_frame_t) if self._last_frame_t is not None else 1.0 / 30
             self._last_frame_t = t
 
@@ -318,6 +330,8 @@ class TrackingPipeline:
 
     def _roi_for(self, frame) -> Optional[Tuple[int, int, int, int]]:
         if self.state not in (TrackState.LOCKED, TrackState.COASTING) or not self.tracker.initialized:
+            return None
+        if not self.cfg.use_roi:
             return None
         if frame.frame_id % 10 == 0:
             return None                      # periodic full frame keeps the clutter model learning
@@ -823,8 +837,8 @@ class TrackingPipeline:
     def _flux_tol(self, locked: bool) -> float:
         sig = math.sqrt(self._lf_var)
         if locked:
-            return min(2.0, max(self.cfg.flux_tolerance, 3.0 * sig))
-        return min(1.5, max(self.cfg.flux_tolerance_coast, 2.5 * sig))
+            return max(self.cfg.flux_tolerance, min(2.0, 3.0 * sig))
+        return max(self.cfg.flux_tolerance_coast, min(1.5, 2.5 * sig))
 
     def _jittery(self) -> bool:
         return self.tracker.initialized and self.tracker.measurement_noise_adapt * self.K.fx > 3.0

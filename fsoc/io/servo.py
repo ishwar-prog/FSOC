@@ -129,17 +129,44 @@ class ServoPanTiltGimbal(GimbalInterface):
         self._pose = (0.0, 0.0)                          # modelled physical pose
         self._vel = (0.0, 0.0)
         self._last_send_t = -1e9
+        self._glide = None
         self._hist: deque = deque()
         self._send(self._sp)
 
     # ------------------------------------------------------------ commands
+    GLIDE_SPEED_DEG = 40.0      # manual / homing moves: top speed...
+    GLIDE_ACCEL_DEG = 120.0     # ...and acceleration (a trapezoidal profile — no jerks)
+
     def command_rate(self, t: float, az_rate: float, el_rate: float) -> None:
         with self._lock:
+            self._glide = None
             self._rate = (az_rate / DEG, el_rate / DEG)
 
-    def goto(self, az_deg: float, el_deg: float) -> None:
-        """Position mode (homing, calibration): jump the setpoint, stop any rate command."""
+    def glide_to(self, az_deg: float, el_deg: float, speed_deg: Optional[float] = None) -> None:
+        """Move smoothly to a pose: accelerate, cruise, brake to a stop on it."""
         with self._lock:
+            self._glide = (self._clamp(az_deg, el_deg), speed_deg or self.GLIDE_SPEED_DEG)
+
+    def glide_target(self) -> Optional[Tuple[float, float]]:
+        with self._lock:
+            return self._glide[0] if self._glide else None
+
+    def _glide_step(self, dt: float) -> None:
+        (ta, te), vmax = self._glide
+        out = []
+        for i, tgt in enumerate((ta, te)):
+            e = tgt - self._sp[i]
+            want = math.copysign(min(vmax, math.sqrt(2.0 * self.GLIDE_ACCEL_DEG * abs(e))), e)
+            step = self.GLIDE_ACCEL_DEG * dt
+            out.append(self._rate[i] + max(-step, min(step, want - self._rate[i])))
+        self._rate = (out[0], out[1])
+        if math.hypot(ta - self._sp[0], te - self._sp[1]) < 0.02 and math.hypot(*self._rate) < 1.0:
+            self._sp, self._rate = (ta, te), (0.0, 0.0)
+
+    def goto(self, az_deg: float, el_deg: float) -> None:
+        """Step to a pose at once (calibration steps). For smooth moves use glide_to."""
+        with self._lock:
+            self._glide = None
             self._rate = (0.0, 0.0)
             self._sp = self._clamp(az_deg, el_deg)
             self._send(self._sp)
@@ -159,6 +186,8 @@ class ServoPanTiltGimbal(GimbalInterface):
                 return
             self._t = t
             dt = min(dt, 0.1)
+            if self._glide is not None:
+                self._glide_step(dt)
             sp = self._clamp(self._sp[0] + self._rate[0] * dt, self._sp[1] + self._rate[1] * dt)
             self._sp = sp
             moving = math.hypot(*self._rate) > self.MOVING_DEG_S

@@ -420,6 +420,46 @@ class ControlRail(QWidget):
         col.addWidget(hw)
         self._scan_ports()
 
+        mc = Card("Pan / tilt control", "Auto: the tracker drives the head. Manual: you do — "
+                  "detection keeps running on screen.",
+                  info="<b>Manual control.</b><br>Moving a slider or pressing a step button switches to "
+                       "Manual. The head glides (smooth acceleration and braking) at the head speed below. "
+                       "Press <b>Auto</b> to hand the head back to the tracker; it continues from what it "
+                       "sees.<br><br>Servo angles are as on the Arduino: pan 90° = ahead, tilt 130° = level.")
+        self.hw_mode = Segmented([("auto", "Auto"), ("manual", "Manual")])
+        self.hw_mode.changed.connect(lambda k: self.engine.set_manual(k == "manual"))
+        mc.body.addWidget(self.hw_mode)
+        self.pan_sl = ValueSlider("Pan servo", 5, 175, 90, 0.5, lambda v: f"{v:.1f}°")
+        self.pan_sl.changed.connect(lambda v: self.engine.manual_servo(pan=v))
+        self.tilt_sl = ValueSlider("Tilt servo", 55, 175, 130, 0.5, lambda v: f"{v:.1f}°")
+        self.tilt_sl.changed.connect(lambda v: self.engine.manual_servo(tilt=v))
+        mc.body.addWidget(self.pan_sl)
+        mc.body.addWidget(self.tilt_sl)
+        pad = QGridLayout()
+        pad.setSpacing(4)
+        self.step_btns = []
+        for text, r, cc, dx, dy in (("Up", 0, 1, 0, 1), ("Left", 1, 0, -1, 0), ("Home", 1, 1, 0, 0),
+                                    ("Right", 1, 2, 1, 0), ("Down", 2, 1, 0, -1)):
+            b = QPushButton(text)
+            if text == "Home":
+                b.clicked.connect(self.engine.manual_home)
+            else:
+                b.clicked.connect(lambda _=False, x=dx, y=dy: self.engine.manual_step(x * self.step_deg(),
+                                                                                       y * self.step_deg()))
+            pad.addWidget(b, r, cc)
+            self.step_btns.append(b)
+        mc.body.addLayout(pad)
+        self.step_seg = Segmented([("1", "1°"), ("5", "5°"), ("15", "15°")], compact=True)
+        self.step_seg.set_current("5")
+        mc.body.addWidget(self.step_seg)
+        self.speed_sl = ValueSlider("Head speed", 5, 90, self.engine.HW_MAX_RATE_DEG, 1, lambda v: f"{v:.0f}°/s",
+                                    info="Top speed of the head while tracking, searching and in manual. "
+                                         "Lower is smoother and gentler on the servos.")
+        self.speed_sl.changed.connect(self.engine.set_head_speed)
+        mc.body.addWidget(self.speed_sl)
+        col.addWidget(mc)
+        self.manual_card = mc
+
         tc = Card("Time of day", info=tip("tod"))
         self.tod = Segmented([("day", "Day"), ("dusk", "Dusk"), ("night", "Night")])
         self.tod.changed.connect(self.engine.set_time_of_day)
@@ -475,6 +515,13 @@ class ControlRail(QWidget):
             pass
         self.hw_port.addItem("None (camera only)", None)
 
+    def step_deg(self) -> float:
+        b = self.step_seg.group.checkedButton()
+        for k, btn in self.step_seg.buttons.items():
+            if btn is b:
+                return float(k)
+        return 5.0
+
     def _connect_hw(self) -> None:
         self.engine.connect_hardware(self.hw_cam.currentIndex(), self.hw_port.currentData())
 
@@ -492,6 +539,13 @@ class ControlRail(QWidget):
             self.hw_status.setText(text)
         self.hw_connect.setEnabled(st is None or st["stage"] == "ERROR")
         self.hw_disconnect.setEnabled(st is not None)
+        live = st is not None and st["stage"] == "TRACKING"
+        self.manual_card.setEnabled(live)
+        if live:
+            self.hw_mode.set_current("manual" if st.get("manual") else "auto")
+            for sl, val in ((self.pan_sl, st["pan"]), (self.tilt_sl, st["tilt"])):
+                if val is not None and not sl.slider.isSliderDown() and not sl.slider.hasFocus():
+                    sl.set_value(val)
 
     def _refresh_video_status(self) -> None:
         e = self.engine

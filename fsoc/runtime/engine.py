@@ -412,8 +412,8 @@ class Engine:
     # scale once the rig has measured its pixels per degree.
     HW_SEARCH_SPEED_DEG = 18.0       # scan speed while searching
     HW_SEARCH_RADIUS_DEG = 100.0     # scan reach (held inside the servo travel)
-    HW_MAX_RATE_DEG = 60.0           # head slew limit...
-    HW_MAX_ACCEL_DEG = 300.0         # ...and acceleration limit: no jerks, no overshoot
+    HW_MAX_RATE_DEG = 35.0           # head slew limit (adjustable live: set_head_speed)...
+    HW_MAX_ACCEL_DEG = 120.0         # ...and acceleration limit: no jerks, no overshoot
     HW_TARGET_RATE_DEG = 120.0       # what the Kalman model allows a hand-held beacon to do
     HW_TARGET_ACCEL_DEG = 400.0
     HW_Q_JERK = 1.0e-3               # manoeuvre noise (working units); stand-in validated 5e-4..1e-3
@@ -421,10 +421,11 @@ class Engine:
     HW_ACTUATOR_LATENCY_S = 0.06     # command -> servo motion, compensated by prediction
     HW_KEYED_WEIGHT = 5.0            # blink evidence vs brightness when ranking lights
     HW_MIN_RANK_AGE_S = 1.0          # watch a light this long (blink evidence) before a lock
+    HW_SIZE_NOISE = 0.12             # centroid uncertainty per px of blob size (close beacons)
     # Loop gains. A webcam's ~0.1 s delay and a hobby servo's lag put the phase margin of the
     # simulator's gains (kp 9/s + integral, tuned for a 20 ms gimbal) near zero: the head would
     # oscillate. No integral here: the servo is a position device, and a deadband winds it up.
-    HW_KP = 3.0
+    HW_KP = 2.5
     HW_KI = 0.0
     HW_KP_SEARCH = 4.0
 
@@ -451,6 +452,7 @@ class Engine:
         self._post(do)
 
     def _drop_hardware(self) -> None:
+        self.hw_manual = False
         rig, self.hw = self.hw, None
         if rig is None:
             return
@@ -476,6 +478,14 @@ class Engine:
         self.pipeline.detector.KEEP_EMBEDDED = True
         cfg.prefer_keyed = True
         cfg.min_rank_age_s = self.HW_MIN_RANK_AGE_S
+        # A beacon brought close grows into a large saturated blob: its brightness climbs fast,
+        # its centre is coarser, and it outgrows the photometry window.
+        cfg.use_roi = False
+        cfg.size_noise = self.HW_SIZE_NOISE
+        cfg.flux_tolerance, cfg.flux_tolerance_coast = 3.0, 2.5
+        self.pipeline.detector.CONSOLIDATE = True
+        self.pipeline.identifier.APERTURE_MAX = 150
+        self.pipeline.identifier.MERGE_DUPLICATES = True
         self.pipeline.identifier.KEYED_WEIGHT = self.HW_KEYED_WEIGHT
         self.pipeline.latency_s = self.HW_ACTUATOR_LATENCY_S
         self.pipeline.reset()
@@ -486,7 +496,69 @@ class Engine:
         self.ui_revision += 1
 
     def hardware_status(self) -> Optional[dict]:
-        return self.hw.status() if self.hw is not None else None
+        if self.hw is None:
+            return None
+        st = self.hw.status()
+        st["manual"] = self.hw_manual
+        st["speed"] = self.HW_MAX_RATE_DEG
+        return st
+
+    # ---- manual pan/tilt
+    hw_manual = False
+
+    def set_manual(self, on: bool) -> None:
+        """Manual: the operator drives the head; detection keeps running and is shown, but the
+        tracker does not move the servos. Back to auto resumes from whatever it sees."""
+        def do():
+            self.hw_manual = bool(on)
+            self.controller.reset()
+            rig = self.hw
+            if rig is not None and rig.servo is not None:
+                if on:
+                    az, el = rig.servo.pose_at_deg(self.clock.now())
+                    rig.servo.glide_to(az, el)                 # stop smoothly where it is
+                else:
+                    rig.servo.command_rate(self.clock.now(), 0.0, 0.0)
+                    rig.holding = False
+            self.ui_revision += 1
+        self._post(do)
+
+    def manual_servo(self, pan: Optional[float] = None, tilt: Optional[float] = None) -> None:
+        """Glide to absolute servo angles (degrees, as on the Arduino: pan 90 ahead, tilt 130 level)."""
+        def do():
+            rig = self.hw
+            if rig is None or rig.servo is None or not rig.ready:
+                return
+            cur = rig.servo.glide_target() or rig.servo.pose_at_deg(self.clock.now())
+            p0, t0 = rig.geometry.servo(*cur)
+            self.hw_manual = True
+            rig.servo.glide_to(*rig.geometry.pose(p0 if pan is None else pan, t0 if tilt is None else tilt),
+                               self.HW_MAX_RATE_DEG)
+        self._post(do)
+
+    def manual_step(self, right_deg: float = 0.0, up_deg: float = 0.0) -> None:
+        """Turn the camera right / up by the given degrees (negative: left / down)."""
+        def do():
+            rig = self.hw
+            if rig is None or rig.servo is None or not rig.ready:
+                return
+            az, el = rig.servo.glide_target() or rig.servo.pose_at_deg(self.clock.now())
+            self.hw_manual = True
+            rig.servo.glide_to(az + right_deg, el + up_deg, self.HW_MAX_RATE_DEG)
+        self._post(do)
+
+    def manual_home(self) -> None:
+        g = self.hw.geometry if self.hw is not None else None
+        if g is not None:
+            self.manual_servo(g.pan_center, g.tilt_level)
+
+    def set_head_speed(self, deg_s: float) -> None:
+        """Top speed of the head, degrees/s — tracking, search and manual moves alike."""
+        deg_s = max(5.0, min(90.0, deg_s))
+        self.HW_MAX_RATE_DEG = deg_s
+        rig = self.hw
+        if rig is not None and rig.ready:
+            self.controller.max_rate = math.radians(deg_s * rig.scale())
 
     # ------------------------------------------------------------------ misc
     def set_hazard(self, key: str, enabled: Optional[bool] = None, intensity: Optional[float] = None) -> None:
@@ -548,8 +620,8 @@ class Engine:
 
     def _control_tick(self, t: float) -> None:
         rig = self.hw
-        if rig is not None and not rig.ready:
-            if rig.servo is not None:               # homing / calibration drive the head directly
+        if rig is not None and (not rig.ready or self.hw_manual):
+            if rig.servo is not None:               # homing / calibration / manual drive the head directly
                 rig.servo.advance(t)
             return
         last = self._last_control_t

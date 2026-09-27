@@ -170,6 +170,7 @@ class BeaconIdentifier:
     # --------------------------------------------------------------- lifecycle
     def reset(self, keep_signature: bool = True) -> None:
         self.tracklets, self.by_id = [], {}
+        self.merged: Dict[int, int] = {}
         self.locked_id = None
         self._mismatch_s = 0.0
         if not keep_signature:
@@ -182,6 +183,33 @@ class BeaconIdentifier:
     def save_signature(self, path: str) -> None:
         with open(path, "w", encoding="utf-8") as f:
             json.dump(self.signature_dict(), f, indent=2)
+
+    def _merge_duplicates(self, assigned) -> None:
+        K = self.K
+        trs = sorted(self.tracklets, key=lambda x: (-x.hits, x.id))       # oldest / best-seen first
+        gone = set()
+        for i, a in enumerate(trs):
+            if a.id in gone:
+                continue
+            for b in trs[i + 1:]:
+                if b.id in gone:
+                    continue
+                gate = max(self.GATE_DEG * DEG, 0.6 * max(a.size or 1.0, b.size or 1.0) / K.fx)
+                if math.hypot(wrap_pi(a.az - b.az) * math.cos(a.el), a.el - b.el) > gate:
+                    continue
+                if b.px is not None and (a.px is None or b.last_det > a.last_det):
+                    a.az, a.el, a.t, a.px = b.az, b.el, b.t, b.px          # b holds this frame's sighting
+                    a.det_az, a.det_el, a.det_t, a.last_det = b.det_az, b.det_el, b.det_t, b.last_det
+                gone.add(b.id)
+                self.merged[b.id] = a.id
+                for k, x in enumerate(assigned):
+                    if x is b:
+                        assigned[k] = a
+        if gone:
+            if self.locked_id in self.merged:
+                self.locked_id = self.merged[self.locked_id]
+            self.tracklets = [x for x in self.tracklets if x.id not in gone]
+            self.by_id = {x.id: x for x in self.tracklets}
 
     def load_signature(self, path: str) -> None:
         with open(path, encoding="utf-8") as f:
@@ -242,6 +270,10 @@ class BeaconIdentifier:
             self.tracklets.append(tr)
             assigned[ci] = tr
 
+        self.merged = {}
+        if self.MERGE_DUPLICATES:
+            self._merge_duplicates(assigned)
+
         # forced photometry — dark (OFF-phase) frames are real samples, not gaps
         H, W = image.shape[:2]
         keep = []
@@ -249,7 +281,7 @@ class BeaconIdentifier:
             px = tr.px or los_to_pixel(tr.az, tr.el, gaz, gel, K)
             # point sources keep the original 13x13 aperture; only a genuinely large light gets a
             # larger one, so the photometry measures it rather than the inside of its own glow
-            rad = 6 if tr.size <= 4.0 else int(min(40, round(2.2 * tr.size)))
+            rad = 6 if tr.size <= 4.0 else int(min(self.APERTURE_MAX, round(2.2 * tr.size)))
             if px is None or not (rad <= px[0] < W - rad - 1 and rad <= px[1] < H - rad - 1):
                 tr.outside += 1
             else:
@@ -393,6 +425,11 @@ class BeaconIdentifier:
 
     SAL_MIN_HITS = 8
     KEYED_WEIGHT = 2.0       # how much blink evidence counts against raw brightness in the ranking
+    APERTURE_MAX = 40        # largest photometry half-width, px (the rig raises it for close beacons)
+    # Fold tracklets that sit on the same light into the oldest one. A light otherwise collects
+    # duplicate tracklets (a noisy velocity pushes a prediction out of the gate, a new one is
+    # born) and its detection then alternates between them. Off by default (validated videos).
+    MERGE_DUPLICATES = False
     SAL_PRIOR = -1.0                    # where a newly ranked light starts
     SAL_RATE = 0.06                     # per frame: ~0.6 s to earn (or lose) a rank at 24-30 FPS
     OCC_DECAY = 0.95                    # image-position occupancy memory, ~1 s

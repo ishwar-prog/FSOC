@@ -242,6 +242,8 @@ class HardwareRig:
         self.detail = note
 
     def _enter_tracking(self) -> None:
+        if hasattr(self.camera, "lock_exposure"):
+            self.camera.lock_exposure()
         w, h = self.camera.size
         f = self.WORK_PX_PER_DEG / DEG
         self.K = CameraIntrinsics(w, h, f, f, w / 2.0, h / 2.0)
