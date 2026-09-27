@@ -103,6 +103,10 @@ class EgoMotion:
 
 class VideoBeaconDetector(BeaconDetector):
     MERGE_PX = 6.0                     # candidates closer than this are the same light
+    # Keep a compact, much brighter point that sits off-centre inside a larger detection: a
+    # distinct light (an LED in front of a lit wall), not the same object at a coarser scale.
+    # Off by default: the recorded-video results were validated without it.
+    KEEP_EMBEDDED = False
     MAX_MOTION_BLOBS = 10
 
     STRONG_SNR = 12.0                  # a bright detection this good needs no help from motion
@@ -227,11 +231,18 @@ class VideoBeaconDetector(BeaconDetector):
         kept: List[Candidate] = []
         for c, s in allc:
             r_new = 0.6 * math.sqrt(max(c.area, 1))
-            if all(math.hypot(c.x - k.x, c.y - k.y) > max(self.MERGE_PX, r_new + 0.6 * math.sqrt(max(k.area, 1)))
-                   for k in kept):
+            if all(self._distinct(c, k, r_new) for k in kept):
                 kept.append(c)
         del kept[self.max_candidates:]
         res.candidates = kept
+
+    def _distinct(self, c: Candidate, k: Candidate, r_new: float) -> bool:
+        d = math.hypot(c.x - k.x, c.y - k.y)
+        rk = math.sqrt(max(k.area, 1))
+        if d > max(self.MERGE_PX, r_new + 0.6 * rk):
+            return True
+        return (self.KEEP_EMBEDDED and c.area <= 0.1 * k.area and c.peak > 1.5 * k.peak
+                and d > max(self.MERGE_PX, 0.3 * rk))
 
     def detect(self, image: np.ndarray, roi: Optional[Tuple[int, int, int, int]] = None) -> DetectionResult:
         gray = image if image.ndim == 2 else cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)

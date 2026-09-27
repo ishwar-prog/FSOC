@@ -5,7 +5,7 @@ import random
 import sys
 
 from PySide6.QtCore import QEasingCurve, QPropertyAnimation, Qt, Signal
-from PySide6.QtWidgets import (QButtonGroup, QFileDialog, QFrame, QGridLayout, QHBoxLayout, QPushButton,
+from PySide6.QtWidgets import (QButtonGroup, QComboBox, QFileDialog, QFrame, QGridLayout, QHBoxLayout, QPushButton,
                                QScrollArea, QStackedWidget, QVBoxLayout, QWidget)
 
 from fsoc.sim.hazards import HAZARD_INFOS
@@ -380,6 +380,46 @@ class ControlRail(QWidget):
         ic.body.addWidget(self.video_status)
         col.addWidget(ic)
 
+        hw = Card("Hardware rig", "USB webcam on the two-servo pan/tilt head (Arduino, D9 pan / D10 tilt)",
+                  info="<b>Live tracking on the real rig.</b><br>Connect → the head homes (pan 90°, tilt 130° = "
+                       "level), nudges each servo to measure its direction, pixels per degree and the "
+                       "camera's delay, then runs the same Search → Acquire → Track → Predict loop as the "
+                       "simulator.")
+        grid = QGridLayout()
+        grid.setHorizontalSpacing(8)
+        grid.setVerticalSpacing(6)
+        grid.addWidget(label("Camera", "caption"), 0, 0)
+        self.hw_cam = QComboBox()
+        self.hw_cam.addItems([f"Camera {i}" for i in range(4)])
+        grid.addWidget(self.hw_cam, 0, 1)
+        grid.addWidget(label("Serial port", "caption"), 1, 0)
+        self.hw_port = QComboBox()
+        for cb in (self.hw_cam, self.hw_port):
+            cb.setSizeAdjustPolicy(QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon)
+            cb.setMinimumContentsLength(6)
+        grid.addWidget(self.hw_port, 1, 1)
+        rescan = QPushButton("Rescan")
+        rescan.setObjectName("ghost")
+        rescan.clicked.connect(self._scan_ports)
+        grid.addWidget(rescan, 1, 2)
+        grid.setColumnStretch(1, 1)
+        hw.body.addLayout(grid)
+        hrow = QHBoxLayout()
+        hrow.setSpacing(8)
+        self.hw_connect = QPushButton("Connect")
+        self.hw_connect.setObjectName("primary")
+        self.hw_connect.clicked.connect(self._connect_hw)
+        self.hw_disconnect = QPushButton("Disconnect")
+        self.hw_disconnect.setObjectName("ghost")
+        self.hw_disconnect.clicked.connect(self.engine.disconnect_hardware)
+        hrow.addWidget(self.hw_connect)
+        hrow.addWidget(self.hw_disconnect)
+        hw.body.addLayout(hrow)
+        self.hw_status = label("Not connected.", "faint", wrap=True)
+        hw.body.addWidget(self.hw_status)
+        col.addWidget(hw)
+        self._scan_ports()
+
         tc = Card("Time of day", info=tip("tod"))
         self.tod = Segmented([("day", "Day"), ("dusk", "Dusk"), ("night", "Night")])
         self.tod.changed.connect(self.engine.set_time_of_day)
@@ -421,6 +461,38 @@ class ControlRail(QWidget):
         if path:
             self.engine.load_video(path)
 
+    def _scan_ports(self) -> None:
+        self.hw_port.clear()
+        try:
+            from serial.tools import list_ports
+            ports = sorted(list_ports.comports(), key=lambda p: ("arduino" not in (p.description or "").lower()
+                                                                 and "ch340" not in (p.description or "").lower(),
+                                                                 p.device))
+            for p in ports:
+                self.hw_port.addItem(p.device, p.device)
+                self.hw_port.setItemData(self.hw_port.count() - 1, p.description, Qt.ItemDataRole.ToolTipRole)
+        except ImportError:
+            pass
+        self.hw_port.addItem("None (camera only)", None)
+
+    def _connect_hw(self) -> None:
+        self.engine.connect_hardware(self.hw_cam.currentIndex(), self.hw_port.currentData())
+
+    def _refresh_hw_status(self) -> None:
+        st = self.engine.hardware_status()
+        if st is None:
+            text = "Not connected."
+        else:
+            stage = {"CONNECTING": "Connecting", "HOMING": "Homing", "CALIBRATING": "Calibrating",
+                     "TRACKING": "Tracking", "ERROR": "Error"}.get(st["stage"], st["stage"])
+            text = f"{stage} — {st['detail']}"
+            if st["pan"] is not None and st["stage"] != "ERROR":
+                text += f"\nServos: pan {st['pan']:.1f}°, tilt {st['tilt']:.1f}°"
+        if self.hw_status.text() != text:
+            self.hw_status.setText(text)
+        self.hw_connect.setEnabled(st is None or st["stage"] == "ERROR")
+        self.hw_disconnect.setEnabled(st is not None)
+
     def _refresh_video_status(self) -> None:
         e = self.engine
         if e.video_error:
@@ -436,6 +508,7 @@ class ControlRail(QWidget):
     # ==================================================================== sync
     def sync(self, force: bool = False) -> None:
         """Reflect engine-side changes (e.g. drag switched to Manual, space switched to night)."""
+        self._refresh_hw_status()
         if not force and self._rev == self.engine.ui_revision:
             return
         self._rev = self.engine.ui_revision

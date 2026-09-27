@@ -173,7 +173,7 @@ class MainWindow(QMainWindow):
         self.cam_card.header.addWidget(self.cam_expand, 0, Qt.AlignmentFlag.AlignTop)
         self.camera = CameraView(self.engine.K)
         self.camera.seeded.connect(self.engine.seed_target)
-        self.camera.set_clickable(self.engine.is_video)
+        self.camera.set_clickable(self.engine.is_real)
         for k, b in self.layer_btns.items():
             self.camera.set_layer(k, b.isChecked())
         self.cam_card.body.addWidget(self.camera, 1)
@@ -271,7 +271,7 @@ class MainWindow(QMainWindow):
                 # drawn at the simulator sensor's scale and the lock would look nowhere near
                 # the beacon. Clicking to pick a target only means something on real footage.
                 self.camera.set_intrinsics(self.engine.K)
-                self.camera.set_clickable(self.engine.is_video)
+                self.camera.set_clickable(self.engine.is_real)
         if self._tick % 3 == 0 and page == 1:
             self.analytics.refresh(s)
 

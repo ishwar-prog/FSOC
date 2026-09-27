@@ -392,6 +392,7 @@ class BeaconIdentifier:
             tr.distinct = min(1.0, d / max(3.0 * spread, 1.5e-4))
 
     SAL_MIN_HITS = 8
+    KEYED_WEIGHT = 2.0       # how much blink evidence counts against raw brightness in the ranking
     SAL_PRIOR = -1.0                    # where a newly ranked light starts
     SAL_RATE = 0.06                     # per frame: ~0.6 s to earn (or lose) a rank at 24-30 FPS
     OCC_DECAY = 0.95                    # image-position occupancy memory, ~1 s
@@ -438,7 +439,7 @@ class BeaconIdentifier:
                 if border and ext < 0.05 * max(W, H):
                     overlay = 1.0
             tr.terms = (prom, keyed, persist, overlay, tr.distinct)
-            tr.sal = (1.0 * prom + 2.0 * keyed + 1.0 * tr.distinct
+            tr.sal = (1.0 * prom + self.KEYED_WEIGHT * keyed + 1.0 * tr.distinct
                       + 1.5 * (persist - 0.7) - 4.0 * overlay)
 
     # ---------------------------------------------------------------- learning

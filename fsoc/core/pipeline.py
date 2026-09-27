@@ -73,6 +73,24 @@ class PipelineConfig:
     reacq_timeout_s: float = 4.0
     max_hypotheses: int = 6
     hypothesis_timeout_s: float = 0.45
+    # Mechanical travel of a real mount, (min, max) in rad. The search pattern is held inside
+    # it, so a scan never waits for a pose the servos cannot reach. None: unlimited (simulator).
+    az_limits: Optional[Tuple[float, float]] = None
+    el_limits: Optional[Tuple[float, float]] = None
+    # Overrides for the Kalman manoeuvre model (see LosKalmanTracker) — a hand-held beacon a few
+    # metres away turns far harder, in angle, than an aircraft kilometres out.
+    tracker_kwargs: dict = field(default_factory=dict)
+    # No-cue lock rule: rank the target only against lights that have a live hypothesis, so a
+    # bright light that can never be locked (a window, a lamp half out of view) cannot block it.
+    rank_among_candidates: bool = False
+    # Watch a light this long before ranking it for a no-cue lock...
+    min_rank_age_s: float = 0.35
+    # ...and, when set, never lock a steady light while a beacon-like blinking one is in view; a
+    # steady light (a beacon that does not blink) qualifies only after `steady_accept_s`.
+    prefer_keyed: bool = False
+    steady_accept_s: float = 3.0
+    min_blink_depth: float = 0.6       # an on/off beacon (photometry is background-subtracted)
+    min_blink_hits: int = 8
 
 
 @dataclass
@@ -158,7 +176,7 @@ class TrackingPipeline:
             self.state = TrackState.SEARCH
             self._state_t = None
             self._mode = TrackState.SEARCH
-            self.tracker = LosKalmanTracker()
+            self.tracker = LosKalmanTracker(**self.cfg.tracker_kwargs)
             self._hyps: List[_Hypothesis] = []
             self._last_hit_t = 0.0
             self._flux_avg = 0.0
@@ -364,10 +382,36 @@ class TrackingPipeline:
     SAL_HANDOVER_S = 0.5               # a better-ranked light must stay better this long
     SAL_MARGIN = 1.5                   # ...by at least this much saliency
 
+    def _make_room_for_blinker(self, i: int, t: float, reacq: bool) -> None:
+        """Hypothesis slots are few, and steady scene features never time out of them. A light
+        proven to blink cleanly must not be locked out: it takes the weakest non-blinker's slot."""
+        tr = self._assign[i] if i < len(self._assign) else None
+        if tr is None or not self._blinkers([tr]) or any(h.tid == tr.id for h in self._hyps):
+            return
+        idf = self.identifier
+        steady = [h for h in self._hyps if not self._blinkers([x for x in [idf.by_id.get(h.tid)] if x])]
+        if steady:
+            self._hyps.remove(min(steady, key=lambda h: self._score(h, t, reacq)))
+
+    def _blinkers(self, tracklets):
+        """Lights that switch cleanly on and off, watched long enough to judge."""
+        cfg = self.cfg
+        return [o for o in tracklets if o.feat is not None and o.p >= 0.6 and o.sal > -9.0
+                and o.feat.depth >= cfg.min_blink_depth and o.hits >= cfg.min_blink_hits]
+
+    @staticmethod
+    def _blink_q(o) -> float:
+        """Blink quality: a clean periodic on/off. Brightness plays no part — a window or a lamp
+        is brighter than an LED, and a patch of scene that merely contains the beacon (or that
+        flickers as the camera moves) has a shallow or irregular modulation."""
+        return o.feat.periodicity * o.feat.depth
+
     def _salient_challenger(self, ltr, los):
         """No-cue self-correction: is some other visible light now clearly more target-like than
         the one we hold? The ranking keeps learning as the clip plays, so an early lock onto an
         overlay or a star is undone as soon as the evidence says so."""
+        if self.cfg.prefer_keyed:
+            return self._blink_challenger(ltr, los)
         cur = ltr.sal if (ltr is not None and ltr.sal > -9.0) else -3.0
         best, best_sal = None, cur + self.SAL_MARGIN
         for i, (c, az, el, r) in enumerate(los):
@@ -378,8 +422,21 @@ class TrackingPipeline:
                 best, best_sal = (i, c, az, el, tr), tr.sal
         return best
 
+    def _blink_challenger(self, ltr, los):
+        """prefer_keyed variant: hand over only to a clearly better blinker."""
+        cur = self._blink_q(ltr) if (ltr is not None and ltr in self._blinkers([ltr])) else 0.0
+        best, best_q = None, max(0.15, 1.3 * cur)
+        for i, (c, az, el, r) in enumerate(los):
+            tr = self._assign[i] if i < len(self._assign) else None
+            if tr is None or tr is ltr or c.snr < self.cfg.min_snr_track or not self._blinkers([tr]):
+                continue
+            q = self._blink_q(tr)
+            if q > best_q:
+                best, best_q = (i, c, az, el, tr), q
+        return best
+
     def _switch_to(self, t: float, c, az: float, el: float, tr) -> Candidate:
-        kf = LosKalmanTracker()
+        kf = LosKalmanTracker(**self.cfg.tracker_kwargs)
         kf.initialize(t, az, el, tr.vaz, tr.vel, pos_sigma=(0.4 / self.K.fx) * 4, vel_sigma=0.5 * DEG)
         self.tracker = kf
         self._flux_avg, self._lf_var = c.flux, 0.0
@@ -598,6 +655,8 @@ class TrackingPipeline:
         max_h = cfg.max_hypotheses
         for i in order:
             c, az, el, r = los[i]
+            if len(self._hyps) >= max_h and cfg.prefer_keyed and allow_spawn and i not in used:
+                self._make_room_for_blinker(i, t, reacq)
             if (not allow_spawn or i in used or c.snr < cfg.min_snr_new
                     or len(self._hyps) >= max_h):
                 continue
@@ -630,7 +689,7 @@ class TrackingPipeline:
                     continue
                 if any(angular_separation(az, el, cl[1], cl[2]) < 0.2 * DEG for cl in self._clutter):
                     continue
-            kf = LosKalmanTracker()
+            kf = LosKalmanTracker(**self.cfg.tracker_kwargs)
             kf.initialize(t, az, el, vaz, vel, pos_sigma=(0.4 / self.K.fx) * 4,
                           vel_sigma=(0.25 if (reacq and not cue_based) else 2.5) * DEG)
             h = _Hypothesis(kf, prior, c.snr, c.flux, t)
@@ -720,13 +779,27 @@ class TrackingPipeline:
             # watched long enough to rank at all. (The keyed-only rules below would let any
             # flickering overlay veto the real target forever when there is no cue cone.)
             tr = idf.by_id.get(h.tid)
-            if tr is None or tr.sal <= -9.0 or t - h.born < 0.35:
+            if tr is None or tr.sal <= -9.0 or t - h.born < self.cfg.min_rank_age_s:
                 return False
-            best = max((o.sal for o in idf.tracklets), default=-9.0)
+            pool = idf.tracklets
+            if self.cfg.prefer_keyed:
+                blinking = self._blinkers(pool)
+                if blinking:                       # a beacon-like light is in view: only the best one
+                    return tr in blinking and self._blink_q(tr) >= 0.9 * max(self._blink_q(o) for o in blinking)
+                if t - h.born < self.cfg.steady_accept_s:
+                    return False                   # nothing blinks: a steady light, after a long look
+            if self.cfg.rank_among_candidates:
+                live = {x.tid for x in self._hyps}
+                pool = [o for o in pool if o.id in live]
+            best = max((o.sal for o in pool), default=-9.0)
             return tr.sal >= best - 0.5
         tr = idf.by_id.get(h.tid)
         p = tr.p if (tr is not None and tr.feat is not None) else None
         if reacq:
+            if self.cfg.prefer_keyed:
+                # a lost blinking beacon comes back blinking: never re-lock a light near the
+                # predicted path on position alone (a lamp or a window would stick)
+                return tr is not None and bool(self._blinkers([tr]))
             return p is None or p >= 0.25 or not idf.sig.learned
         age = t - h.born
         if self._space_cue() and not idf.sig.learned:
@@ -786,10 +859,14 @@ class TrackingPipeline:
         if tr is not None and tr.feat is not None and self.identifier.enabled:
             s += 0.8 * tr.llr
         if tr is not None and self._cue is None and self.identifier.enabled and tr.sal > -9.0:
-            # No external cue to point the way (a recorded video): the identifier's scene-relative
-            # saliency — prominence, keying, behaviour, persistence, not-an-overlay — decides.
-            # With a cue present this stays off entirely, so the simulator is unaffected.
-            s += 1.5 * tr.sal
+            if self.cfg.prefer_keyed:
+                # Our own blinking beacon: a clean periodic on/off decides, not brightness.
+                s += 12.0 * self._blink_q(tr) if self._blinkers([tr]) else -2.0
+            else:
+                # No external cue to point the way (a recorded video): the identifier's scene-relative
+                # saliency — prominence, keying, behaviour, persistence, not-an-overlay — decides.
+                # With a cue present this stays off entirely, so the simulator is unaffected.
+                s += 1.5 * tr.sal
         if h.hits >= 3:
             s -= 3.0 * h.lf_var if tr is None or tr.feat is None else 0.0
             if reacq:
@@ -939,9 +1016,22 @@ class TrackingPipeline:
             rmax = self._reacq_rmax
         return b, rmax, self._search_s
 
+    @property
+    def reacquiring(self) -> bool:
+        """True while hunting for a target just lost (path prediction), False on a fresh search."""
+        return self._mode == TrackState.REACQUIRE
+
     def search_center(self, t: float):
         with self._lock:
             return self._search_center_at(t)
+
+    def _within_travel(self, az: float, el: float) -> Tuple[float, float]:
+        cfg = self.cfg
+        if cfg.az_limits is not None:
+            az = max(cfg.az_limits[0], min(cfg.az_limits[1], az))
+        if cfg.el_limits is not None:
+            el = max(cfg.el_limits[0], min(cfg.el_limits[1], el))
+        return az, el
 
     def _spiral_reference(self, t: float, dt: float, enc_az: float, enc_el: float):
         if self._mode == TrackState.SEARCH and self._cue is None:
@@ -956,8 +1046,7 @@ class TrackingPipeline:
             self._search_started = True
 
         ox, oy = self._spiral_offsets(self._search_s, b)
-        ref_az = caz + ox / max(0.2, math.cos(cel))
-        ref_el = cel + oy
+        ref_az, ref_el = self._within_travel(caz + ox / max(0.2, math.cos(cel)), cel + oy)
         err = math.hypot(wrap_pi(ref_az - enc_az) * math.cos(cel), ref_el - enc_el)
         # Space: ephemeris + orbit prediction are accurate, so stare instead of scanning while
         # candidates in view mature, and after a loss while the prediction is still fresh.

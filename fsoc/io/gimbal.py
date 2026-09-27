@@ -119,23 +119,3 @@ class StaticMount(GimbalInterface):
 
     def command_rate(self, t: float, az_rate: float, el_rate: float) -> None:
         pass
-
-
-class SerialPanTiltGimbal(GimbalInterface):
-    """Hardware stage (next milestone): servo drive over serial / CAN.
-
-    Expected wiring of the two methods:
-      read_state  -> poll encoders (or use the drive's streamed telemetry), convert counts
-                     to radians, timestamp with time.perf_counter() at reception minus the
-                     measured transport delay.
-      command_rate-> send velocity setpoints in the drive's units at >= 50 Hz.
-    """
-
-    def __init__(self, port: str = "COM3", baud: int = 115200) -> None:
-        self.port, self.baud = port, baud
-
-    def read_state(self, t: float) -> GimbalState:
-        raise NotImplementedError("Hardware gimbal driver is scheduled for the hardware stage")
-
-    def command_rate(self, t: float, az_rate: float, el_rate: float) -> None:
-        raise NotImplementedError("Hardware gimbal driver is scheduled for the hardware stage")

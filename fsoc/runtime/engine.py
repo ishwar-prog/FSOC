@@ -18,9 +18,9 @@ from typing import Callable, Dict, List, Optional, Tuple
 
 import numpy as np
 
-from ..core.controller import GimbalController
+from ..core.controller import ControllerGains, GimbalController
 from ..core.geometry import CameraIntrinsics
-from ..core.pipeline import PipelineOutput, TrackingPipeline
+from ..core.pipeline import PipelineOutput, TrackingPipeline, TrackState
 from ..core.video import EgoMotion, VideoBeaconDetector
 from ..io.gimbal import SimulatedGimbal
 from ..io.sources import VideoFileSource
@@ -29,6 +29,7 @@ from ..sim.renderer import SensorRenderer, Truth
 from ..sim.terminals import PLATFORM_BY_KEY
 from ..sim.world import SimWorld
 from .evaluator import Evaluator
+from .hardware import HardwareRig, RigStage
 from .recorder import Recorder
 
 DEFAULT_PATTERN = {"quad": "hover", "fixedwing": "orbit", "ship": "maritime",
@@ -107,6 +108,7 @@ class Snapshot:
     cam_pos: Tuple[float, float, float]
     platform: str
     domain: str
+    hardware: Optional[dict] = None
 
 
 class Engine:
@@ -119,6 +121,7 @@ class Engine:
         self.seed = seed
         self.world = SimWorld(seed, pattern)
         self.gimbal = SimulatedGimbal()
+        self._sim_gimbal = self.gimbal
         self.renderer = SensorRenderer(self.K, self.world, self.gimbal, seed)
         self.pipeline = TrackingPipeline(self.K)
         self.controller = GimbalController()
@@ -145,6 +148,7 @@ class Engine:
         self._video_path: Optional[str] = None
         self.video_error: Optional[str] = None
         self._ego: Optional[EgoMotion] = None
+        self.hw: Optional[HardwareRig] = None
         self.gimbal.reset(*self._park_pose(0.0))
 
     # ================================================================ lifecycle
@@ -162,6 +166,8 @@ class Engine:
         self._stop.set()
         for th in self._threads:
             th.join(timeout=1.0)
+        if self.hw is not None:
+            self.hw.close()
 
     # ================================================================ commands
     def _post(self, fn: Callable[[], None]) -> None:
@@ -339,6 +345,7 @@ class Engine:
                 self.video_error = str(ex)
                 self.ui_revision += 1
                 return
+            self._drop_hardware()
             if self.video_source is not None:
                 self.video_source.close()
             self.video_source = src
@@ -350,6 +357,7 @@ class Engine:
 
     def use_simulation(self) -> None:
         def do():
+            self._drop_hardware()
             if self.video_source is not None:
                 self.video_source.close()
             self.video_source = None
@@ -389,6 +397,96 @@ class Engine:
     @property
     def is_video(self) -> bool:
         return self.video_source is not None
+
+    @property
+    def is_hardware(self) -> bool:
+        return self.hw is not None
+
+    @property
+    def is_real(self) -> bool:
+        """Real footage (video or live camera): no ground truth, operator may point at the target."""
+        return self.is_video or self.is_hardware
+
+    # ------------------------------------------------------------------ hardware
+    # Tracking settings for the pan/tilt head, in real degrees; converted to the tracker's working
+    # scale once the rig has measured its pixels per degree.
+    HW_SEARCH_SPEED_DEG = 18.0       # scan speed while searching
+    HW_SEARCH_RADIUS_DEG = 100.0     # scan reach (held inside the servo travel)
+    HW_MAX_RATE_DEG = 60.0           # head slew limit...
+    HW_MAX_ACCEL_DEG = 300.0         # ...and acceleration limit: no jerks, no overshoot
+    HW_TARGET_RATE_DEG = 120.0       # what the Kalman model allows a hand-held beacon to do
+    HW_TARGET_ACCEL_DEG = 400.0
+    HW_Q_JERK = 1.0e-3               # manoeuvre noise (working units); stand-in validated 5e-4..1e-3
+    HW_TARGET_TAU_S = 1.0
+    HW_ACTUATOR_LATENCY_S = 0.06     # command -> servo motion, compensated by prediction
+    HW_KEYED_WEIGHT = 5.0            # blink evidence vs brightness when ranking lights
+    HW_MIN_RANK_AGE_S = 1.0          # watch a light this long (blink evidence) before a lock
+    # Loop gains. A webcam's ~0.1 s delay and a hobby servo's lag put the phase margin of the
+    # simulator's gains (kp 9/s + integral, tuned for a 20 ms gimbal) near zero: the head would
+    # oscillate. No integral here: the servo is a position device, and a deadband winds it up.
+    HW_KP = 3.0
+    HW_KI = 0.0
+    HW_KP_SEARCH = 4.0
+
+    def connect_hardware(self, camera_index: int = 0, port: Optional[str] = None,
+                         hfov_deg: float = 60.0) -> None:
+        """Track with the real rig: USB webcam + two-servo pan/tilt head on `port`."""
+        def do():
+            self._drop_hardware()
+            if self.video_source is not None:
+                self.video_source.close()
+                self.video_source, self._video_path = None, None
+            rig = HardwareRig(camera_index, port, hfov_deg)
+            self.hw = rig
+            rig.start()
+            self.ui_revision += 1
+        self._post(do)
+
+    def disconnect_hardware(self) -> None:
+        def do():
+            if self.hw is not None:
+                self._drop_hardware()
+                self._rebuild_for(self._sim_K, video=False)
+                self.ui_revision += 1
+        self._post(do)
+
+    def _drop_hardware(self) -> None:
+        rig, self.hw = self.hw, None
+        if rig is None:
+            return
+        self.gimbal = self._sim_gimbal
+        self.controller = GimbalController()
+        rig.close()
+
+    def _enter_hardware_tracking(self, rig: HardwareRig) -> None:
+        """Calibration done: the same pipeline and controller as the simulator take the head."""
+        k = rig.scale()
+        self.gimbal = rig.gimbal
+        self._rebuild_for(rig.K, video=True)
+        cfg = self.pipeline.cfg
+        cfg.az_limits, cfg.el_limits = rig.work_limits()
+        cfg.search_speed_deg = self.HW_SEARCH_SPEED_DEG * k
+        cfg.search_radius_deg = self.HW_SEARCH_RADIUS_DEG * k
+        cfg.tracker_kwargs = dict(q_jerk=self.HW_Q_JERK, tau_s=self.HW_TARGET_TAU_S,
+                                  vel_limit=self.HW_TARGET_RATE_DEG * k * math.pi / 180.0,
+                                  acc_limit=self.HW_TARGET_ACCEL_DEG * k * math.pi / 180.0)
+        # Our own beacon blinks: on a live rig that evidence outranks raw brightness (windows,
+        # lamps and reflections in a room are brighter and larger than a small LED).
+        cfg.rank_among_candidates = True
+        self.pipeline.detector.KEEP_EMBEDDED = True
+        cfg.prefer_keyed = True
+        cfg.min_rank_age_s = self.HW_MIN_RANK_AGE_S
+        self.pipeline.identifier.KEYED_WEIGHT = self.HW_KEYED_WEIGHT
+        self.pipeline.latency_s = self.HW_ACTUATOR_LATENCY_S
+        self.pipeline.reset()
+        self.controller = GimbalController(max_rate_deg=self.HW_MAX_RATE_DEG * k,
+                                           max_accel_deg=self.HW_MAX_ACCEL_DEG * k,
+                                           gains=ControllerGains(kp_track=self.HW_KP, ki_track=self.HW_KI,
+                                                                 kp_search=self.HW_KP_SEARCH))
+        self.ui_revision += 1
+
+    def hardware_status(self) -> Optional[dict]:
+        return self.hw.status() if self.hw is not None else None
 
     # ------------------------------------------------------------------ misc
     def set_hazard(self, key: str, enabled: Optional[bool] = None, intensity: Optional[float] = None) -> None:
@@ -449,6 +547,11 @@ class Engine:
                 nxt = time.perf_counter()
 
     def _control_tick(self, t: float) -> None:
+        rig = self.hw
+        if rig is not None and not rig.ready:
+            if rig.servo is not None:               # homing / calibration drive the head directly
+                rig.servo.advance(t)
+            return
         last = self._last_control_t
         dt = (t - last) if last is not None else 1.0 / self.CONTROL_HZ
         if dt <= 0 or dt > 0.2:
@@ -457,10 +560,26 @@ class Engine:
         self.gimbal.advance(t)
         st = self.gimbal.read_state(t)
         az, el, vaz, vel, tracking = self.pipeline.pointing_reference(t, dt, st.az, st.el)
-        caz, cel = self.controller.compute(dt, st.az, st.el, az, el, vaz, vel, tracking)
+        if rig is not None:
+            p = self.pipeline
+            if p.state in (TrackState.SEARCH, TrackState.ACQUIRING) and not p.reacquiring:
+                saz, sel = rig.scan_target(t, acquiring=p.state == TrackState.ACQUIRING)
+                az, el = saz * rig.gimbal.kx * math.pi / 180.0, sel * rig.gimbal.ky * math.pi / 180.0
+                vaz = vel = 0.0
+                tracking = False
+            else:
+                rig.restart_scan()
+        if rig is not None and rig.holding:
+            self.controller.reset()                 # beacon centred: keep the head still (servo deadband)
+            caz = cel = 0.0
+        else:
+            caz, cel = self.controller.compute(dt, st.az, st.el, az, el, vaz, vel, tracking)
         self.gimbal.command_rate(t, caz, cel)
 
     def _vision_tick(self, t: float) -> None:
+        if self.hw is not None:
+            self._vision_tick_hardware(t)
+            return
         if self.video_source is not None:
             self._vision_tick_video(t)
             return
@@ -505,6 +624,49 @@ class Engine:
         self.recorder.add(out, truth, self.evaluator, stage)
         self._publish(frame.t, frame.image, out, truth, stage)
 
+    def _vision_tick_hardware(self, t: float) -> None:
+        rig = self.hw
+        if rig.stage in (RigStage.CONNECTING, RigStage.ERROR):
+            return
+        c0 = time.perf_counter()
+        got = rig.frame(t)
+        if got is None:
+            return
+        frame, age = got
+        if not rig.ready:
+            rig.step(t, frame.image, age)
+            h, w = frame.image.shape[:2]
+            if self.K.width != w or self.K.height != h:
+                f = HardwareRig.WORK_PX_PER_DEG * 180.0 / math.pi
+                self.K = CameraIntrinsics(w, h, f, f, w / 2.0, h / 2.0)
+            if rig.ready:
+                self._enter_hardware_tracking(rig)
+            out = PipelineOutput(t=frame.t, frame_id=frame.frame_id, state=TrackState.SEARCH, state_age=0.0)
+            stage = ((time.perf_counter() - c0) * 1000.0, 0.0, 0.0)
+            self._publish(frame.t, frame.image, out, self._no_truth(frame), stage)
+            return
+        out = self.pipeline.process_frame(frame)
+        if rig.observe(frame.t, out.measurement):       # a servo turned out reversed: restart the track
+            self.pipeline.reset()
+            self.controller.reset()
+        rate = 0.0
+        if out.track_los is not None:
+            k = rig.scale()
+            rate = math.degrees(math.hypot(out.track_los[2], out.track_los[3])) / k
+        rig.update_hold(frame.t, out.state, out.measurement, rate)
+        render_ms = (time.perf_counter() - c0) * 1000.0 - out.detect_ms - out.track_ms
+        truth = self._no_truth(frame)
+        stage = (max(0.0, render_ms), out.detect_ms, out.track_ms)
+        self.evaluator.on_frame(out, truth, stage[0], out.detect_ms, out.track_ms, has_truth=False)
+        self.recorder.add(out, truth, self.evaluator, stage)
+        self._publish(frame.t, frame.image, out, truth, stage)
+
+    @staticmethod
+    def _no_truth(frame) -> Truth:
+        return Truth(t=frame.t, target_px=None, in_fov=False, occluded=False, occlusion_kind="",
+                     target_los=(0.0, 0.0), range_m=0.0, cam_az=frame.gimbal_az, cam_el=frame.gimbal_el,
+                     beacon_peak_dn=0.0, beacon_on=True)
+
     def rates(self) -> Dict[str, float]:
         if self.headless:
             return {"vision": self._sim_rates[0], "control": self._sim_rates[1], "render": None}
@@ -530,6 +692,7 @@ class Engine:
             centroid_err=ev.last_centroid_err, pointing_err=ev.last_pointing_err,
             track_sep_px=ev.last_track_sep_px, paused=self.clock.paused, run_id=self.run_id,
             cam_pos=w.camera_pos(t), platform=w.remote.info.platform, domain=w.domain,
+            hardware=self.hardware_status(),
         )
         self._snapshot = snap
         for fn in self.frame_listeners:
