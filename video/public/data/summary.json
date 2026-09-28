@@ -1,0 +1,92 @@
+{
+ "decoys": {
+  "case": "Dim beacon \u00b7 bright blinking decoys",
+  "passed": true,
+  "metrics": {
+   "acquisition": {
+    "value": 1.033,
+    "status": "pass"
+   },
+   "tracking_error": {
+    "value": 0.037,
+    "status": "pass"
+   },
+   "target_loss": {
+    "value": 3.908,
+    "status": "pass"
+   },
+   "reacquisition": {
+    "value": 0.167,
+    "status": "pass"
+   },
+   "processing": {
+    "value": 30.0,
+    "status": "pass"
+   },
+   "camera_rate": {
+    "value": 60.0,
+    "status": "pass"
+   }
+  }
+ },
+ "leo": {
+  "case": "Satellite \u00b7 LEO Pass",
+  "passed": true,
+  "metrics": {
+   "acquisition": {
+    "value": 1.2,
+    "status": "pass"
+   },
+   "tracking_error": {
+    "value": 0.018,
+    "status": "pass"
+   },
+   "target_loss": {
+    "value": 4.509,
+    "status": "pass"
+   },
+   "reacquisition": {
+    "value": 0.333,
+    "status": "pass"
+   },
+   "processing": {
+    "value": 30.0,
+    "status": "pass"
+   },
+   "camera_rate": {
+    "value": 60.0,
+    "status": "pass"
+   }
+  }
+ },
+ "storm": {
+  "case": "Storm (fog+rain+shimmer+vibration)",
+  "passed": true,
+  "metrics": {
+   "acquisition": {
+    "value": 1.8,
+    "status": "pass"
+   },
+   "tracking_error": {
+    "value": 2.156,
+    "status": "pass"
+   },
+   "target_loss": {
+    "value": 4.486,
+    "status": "pass"
+   },
+   "reacquisition": {
+    "value": 0.3,
+    "status": "pass"
+   },
+   "processing": {
+    "value": 30.0,
+    "status": "pass"
+   },
+   "camera_rate": {
+    "value": 60.0,
+    "status": "pass"
+   }
+  }
+ }
+}

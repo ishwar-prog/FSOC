@@ -79,3 +79,5 @@ $RECYCLE.BIN/
 hw_check_blink.png
 hw_check_detections.png
 hw_check_frame.png
+video/node_modules/
+video/out/
