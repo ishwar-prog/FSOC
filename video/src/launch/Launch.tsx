@@ -182,7 +182,7 @@ function Close({ frame, fps }: { frame: number; fps: number }) {
         <div style={{ transform: `scale(${0.6 + pop * 0.4})` }}>
           <Mark size={170} draw={draw} locked={frame > MARK_AT + 44 ? 1 : 0} />
         </div>
-        <Wordmark size={96} delay={MARK_AT + 26} tone="#f3f6fb" />
+        <Wordmark size={160} delay={MARK_AT + 26} tone="#f3f6fb" />
         <div style={{ fontFamily: font.mono, fontSize: 32, fontWeight: 600, letterSpacing: "0.2em", color: color.accent, opacity: tag, transform: `translateY(${(1 - tag) * 12}px)` }}>
           POINT · ACQUIRE · TRACK
         </div>

@@ -61,7 +61,7 @@ export function Banner() {
         <div style={{ flex: 1, display: "flex", flexDirection: "column", gap: 26 }}>
           <div style={{ display: "flex", alignItems: "center", gap: 26 }}>
             <Mark size={104} />
-            <div style={{ fontFamily: font.display, fontWeight: 600, fontSize: 76, letterSpacing: "-0.035em", whiteSpace: "nowrap" }}>FSOC Beacon Tracker</div>
+            <div style={{ fontFamily: font.display, fontWeight: 600, fontSize: 120, letterSpacing: "-0.035em", whiteSpace: "nowrap" }}>COSTA</div>
           </div>
           <div style={{ fontSize: 38, lineHeight: 1.3, color: color.text2, maxWidth: 860 }}>
             Finds the partner terminal's beacon <b style={{ color: color.text }}>by how it blinks</b>, not how bright it is, and holds it on bore-sight.

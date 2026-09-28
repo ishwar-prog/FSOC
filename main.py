@@ -1,4 +1,4 @@
-"""FSOC Beacon Tracker — entry point (also the PyInstaller target)."""
+"""COSTA — entry point (also the PyInstaller target)."""
 
 import os
 import sys
@@ -21,7 +21,7 @@ def main() -> int:
     from PySide6.QtWidgets import QApplication, QMessageBox
 
     app = QApplication(sys.argv)
-    app.setApplicationName("FSOC Beacon Tracker")
+    app.setApplicationName("COSTA")
     app.setOrganizationName("SIH26169")
     app.setStyle("Fusion")
 
@@ -31,7 +31,7 @@ def main() -> int:
     def excepthook(etype, value, tb):
         text = "".join(traceback.format_exception(etype, value, tb))
         path = _crash_log(text)
-        QMessageBox.critical(None, "FSOC Beacon Tracker", f"Unexpected error — details saved to\n{path}\n\n{value}")
+        QMessageBox.critical(None, "COSTA", f"Unexpected error — details saved to\n{path}\n\n{value}")
 
     sys.excepthook = excepthook
 

@@ -1,14 +1,14 @@
 {
-  "name": "fsoc-videos",
+  "name": "costa-videos",
   "private": true,
   "version": "1.0.0",
-  "description": "FSOC Beacon Tracker videos, composed with Remotion.",
+  "description": "COSTA videos, composed with Remotion.",
   "type": "module",
   "scripts": {
     "dev": "remotion studio",
     "still": "remotion still",
     "render": "remotion render Intro ../docs/assets/intro.mp4 --codec=h264 --crf=18",
-    "render:pitch": "remotion render Pitch ../presentation/FSOC_SIH_Presentation.mp4 --codec=h264 --crf=18",
+    "render:pitch": "remotion render Pitch ../presentation/COSTA_SIH_Presentation.mp4 --codec=h264 --crf=18",
     "render:launch": "remotion render Launch ../docs/assets/launch.mp4 --codec=h264 --crf=17"
   },
   "dependencies": {

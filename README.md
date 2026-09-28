@@ -1,7 +1,7 @@
 <a id="top"></a>
 
 <p align="center">
-  <img alt="FSOC Beacon Tracker: finds the partner terminal's beacon by how it blinks, and holds it on bore-sight." src="docs/assets/banner-light.png">
+  <img alt="COSTA, Coarse Optical Tracking and Alignment System: finds the partner terminal's beacon by how it blinks, and holds it on bore-sight." src="docs/assets/banner-light.png">
 </p>
 
 <p align="center">
@@ -12,6 +12,9 @@
   <img alt="No training data, no deep learning" src="https://img.shields.io/badge/training%20data-none-08b44d?style=flat-square&labelColor=eef1f5">
   <img alt="SIH26169 targets: 6 of 6" src="https://img.shields.io/badge/SIH26169-6%20of%206%20targets-08b44d?style=flat-square&labelColor=eef1f5">
 </p>
+
+<h1 align="center">COSTA</h1>
+<p align="center"><b>Coarse Optical Tracking &amp; Alignment System</b></p>
 
 <p align="center">
   <b>Coarse pointing, acquisition and tracking for a free-space optical link.</b><br>
@@ -30,10 +33,10 @@
 <br>
 
 <p align="center">
-  <img alt="FSOC Beacon Tracker intro: what it does, in under a minute" src="docs/assets/intro.webp" width="100%">
+  <img alt="COSTA intro: what it does, in under a minute" src="docs/assets/intro.webp" width="100%">
 </p>
 <p align="center">
-  <sub>The FSOC Beacon Tracker in under a minute.</sub>
+  <sub>COSTA in under a minute.</sub>
 </p>
 
 <br>
@@ -71,7 +74,7 @@ A free-space optical link carries data on a laser beam narrower than a football 
 kilometre. Before a single bit can flow, each terminal has to find the other's beacon in a
 4° × 3° camera view and keep it centred while both ends move. At range the beacon can be fainter
 than a street lamp, a star or a sun-lit spacecraft, so "track the brightest light" fails the moment
-the sky gets busy. **The FSOC Beacon Tracker** recognises the beacon by its learned blink signature,
+the sky gets busy. **COSTA** recognises the beacon by its learned blink signature,
 confirms it with geometry, and hands a smooth pointing reference to the gimbal, whether the partner
 is a drone, a ship, an aircraft, a LEO satellite, a GEO relay or the space station.
 
@@ -203,7 +206,7 @@ never blocks either loop.
 ## Quick start
 
 ```bash
-dist\FSOC_Beacon_Tracker.exe                 # the app, no Python needed
+dist\COSTA.exe                              # the app, no Python needed
 ```
 
 ```bash

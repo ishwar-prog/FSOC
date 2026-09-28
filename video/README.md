@@ -1,4 +1,6 @@
-# FSOC Beacon Tracker videos
+# COSTA videos
+
+Videos for COSTA, the Coarse Optical Tracking & Alignment System.
 
 Remotion 4 project, same setup as H.A.L.O.'s. All compositions are 1920×1080 at 30 fps.
 

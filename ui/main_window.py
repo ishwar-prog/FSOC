@@ -66,7 +66,7 @@ class ChipToggle(QPushButton):
 class MainWindow(QMainWindow):
     def __init__(self) -> None:
         super().__init__()
-        self.setWindowTitle("FSOC Beacon Tracker — Coarse PAT · SIH26169")
+        self.setWindowTitle("COSTA — Coarse Optical Tracking & Alignment System · SIH26169")
         self.setWindowIcon(app_icon())
         self.resize(1520, 920)
         self.setMinimumSize(1200, 720)

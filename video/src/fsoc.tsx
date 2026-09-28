@@ -209,7 +209,7 @@ export function Mark({ size, draw = 1, locked = 1 }: { size: number; draw?: numb
 export function Wordmark({ size = 64, delay = 0, tone = color.text }: { size?: number; delay?: number; tone?: string }) {
   const frame = useCurrentFrame();
   const { fps } = useVideoConfig();
-  const text = "FSOC Beacon Tracker";
+  const text = "COSTA";
   return (
     <div style={{ fontFamily: font.display, fontWeight: 600, fontSize: size, letterSpacing: "-0.03em", color: tone, whiteSpace: "nowrap" }}>
       {text.split("").map((ch, i) => {

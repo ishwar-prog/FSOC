@@ -1,5 +1,5 @@
 /*
-  FSOC Beacon Tracker — pan/tilt servo head (Arduino Uno / Nano)
+  COSTA — pan/tilt servo head (Arduino Uno / Nano)
 
   Wiring
     D9  -> pan  servo signal (SG90)

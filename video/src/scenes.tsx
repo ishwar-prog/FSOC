@@ -101,7 +101,7 @@ export function LogoScene() {
         <div style={{ transform: `scale(${0.6 + pop * 0.4})` }}>
           <Mark size={160} draw={draw} locked={frame > 30 ? 1 : 0} />
         </div>
-        <Wordmark size={92} delay={10} tone="#f3f6fb" />
+        <Wordmark size={150} delay={10} tone="#f3f6fb" />
       </AbsoluteFill>
     </Night>
   );
@@ -405,7 +405,7 @@ export function CloseScene() {
         <div style={{ transform: `scale(${0.6 + pop * 0.4})` }}>
           <Mark size={150} draw={draw} locked={frame > 30 ? 1 : 0} />
         </div>
-        <Wordmark size={88} delay={12} tone="#f3f6fb" />
+        <Wordmark size={140} delay={12} tone="#f3f6fb" />
         <div style={{ fontFamily: font.mono, fontSize: 30, fontWeight: 600, letterSpacing: "0.2em", color: color.accent, opacity: tag }}>POINT · ACQUIRE · TRACK</div>
         <div style={{ marginTop: 20, fontFamily: font.mono, fontSize: 24, color: "#7f8aa3", opacity: tag }}>github.com/ishwar-prog/FSOC · SIH26169</div>
       </AbsoluteFill>
