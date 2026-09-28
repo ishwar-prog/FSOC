@@ -66,7 +66,7 @@ class ChipToggle(QPushButton):
 class MainWindow(QMainWindow):
     def __init__(self) -> None:
         super().__init__()
-        self.setWindowTitle("FSOC Beacon Tracker — Coarse PAT · SIH26169")
+        self.setWindowTitle("COSTA — Coarse PAT · SIH26169")
         self.setWindowIcon(app_icon())
         self.resize(1520, 920)
         self.setMinimumSize(1200, 720)
@@ -114,7 +114,7 @@ class MainWindow(QMainWindow):
         h.addWidget(Logo())
         tb = QVBoxLayout()
         tb.setSpacing(1)
-        t = label("FSOC BEACON TRACKER", "h1")
+        t = label("COSTA", "h1")
         t.setStyleSheet(f"font-size: 12pt; font-weight: 700; letter-spacing: -0.2px; color: {P['head']};")
         tb.addWidget(t)
         tb.addWidget(label(f"SIH26169 · Pointing, acquisition, tracking · v{__version__}", "faint"))
