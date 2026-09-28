@@ -45,7 +45,7 @@
   <img alt="Locking a LEO satellite's beacon through a dense star field" src="docs/assets/demo.webp" width="100%">
 </p>
 <p align="center">
-  <sub>LEO pass through a dense star field: pre-pointed from the ephemeris, the beacon picked out by its blink, locked in 1.2 s and held to within about 2 px. Shown at 2× speed.</sub>
+  <sub>A real recording of COSTA on a LEO pass through a dense satellite field: cold start, lock, a 2.5 s blockage, re-acquisition, and all six targets passing. Sped up about 2.4×.</sub>
 </p>
 
 <details>
@@ -128,11 +128,11 @@ see it. The live **Mission targets** panel scores all six with PASS / FAIL as yo
     <td><sub><b>Analytics.</b> Error timeline with state band, centroid bullseye, loop rates and the per-stage latency budget.</sub></td>
   </tr>
   <tr>
-    <td><img alt="Beacon identity card" src="docs/assets/beacon-identity.png"></td>
+    <td><img alt="Camera sensor locked on the beacon" src="docs/assets/camera-sensor.jpg"></td>
     <td><img alt="Orbit schematic for a LEO pass" src="docs/assets/orbit-view.jpg"></td>
   </tr>
   <tr>
-    <td><sub><b>Beacon identity.</b> The learned rate and duty, and a beacon probability for every light in view.</sub></td>
+    <td><sub><b>Camera sensor.</b> What the tracker sees: lock brackets, identity label, the ±10 px ring and a sub-pixel zoom.</sub></td>
     <td><sub><b>Space.</b> Orbit schematic with pass progress and a sky plot. The camera's field of view is drawn as a wedge.</sub></td>
   </tr>
 </table>

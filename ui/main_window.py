@@ -114,7 +114,7 @@ class MainWindow(QMainWindow):
         h.addWidget(Logo())
         tb = QVBoxLayout()
         tb.setSpacing(1)
-        t = label("FSOC BEACON TRACKER", "h1")
+        t = label("COSTA", "h1")
         t.setStyleSheet(f"font-size: 12pt; font-weight: 700; letter-spacing: -0.2px; color: {P['head']};")
         tb.addWidget(t)
         tb.addWidget(label(f"SIH26169 · Pointing, acquisition, tracking · v{__version__}", "faint"))
