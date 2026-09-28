@@ -66,9 +66,17 @@ class LiveCameraSource(FrameSource):
     and detection runs ~4x faster).
     """
 
+    #: How a colour frame becomes the mono image the detector works on.
+    #:   "max"  — the brightest of B, G, R. A coloured LED keeps its full brightness.
+    #:   "gray" — ITU luma (0.299 R + 0.587 G + 0.114 B), what a mono sensor would see.
+    #: "gray" is wrong for a coloured beacon: a saturated red LED at 255 counts as 76, which is
+    #: dimmer than a white wall, so the beacon is invisible to the detector. "max" is the default
+    #: for live cameras for that reason.
+    LUMA = "max"
+
     def __init__(self, index: int = 0, gimbal: GimbalInterface = None, hfov_deg: float = 60.0,
                  width: int = 1280, height: int = 720, fps: int = 30, process_width: int = 640,
-                 exposure: Optional[float] = None) -> None:
+                 exposure: Optional[float] = None, luma: Optional[str] = None) -> None:
         self.cap = cv2.VideoCapture(index, cv2.CAP_DSHOW)
         if not self.cap.isOpened():
             self.cap = cv2.VideoCapture(index)
@@ -92,10 +100,12 @@ class LiveCameraSource(FrameSource):
         vfov = 2.0 * math.degrees(math.atan(math.tan(math.radians(hfov_deg) / 2.0) * ph / pw))
         self.intrinsics = CameraIntrinsics.from_fov(pw, ph, hfov_deg, vfov)
         self.gimbal = gimbal
+        self.luma = luma or self.LUMA
         self._lock = threading.Lock()
         self._latest: Optional[Tuple[np.ndarray, float, int]] = None
         self._n = 0
         self._taken = 0
+        self.exposure_locked = False
         self._stop = threading.Event()
         self._thread = threading.Thread(target=self._grab, name="camera", daemon=True)
         self._thread.start()
@@ -107,26 +117,54 @@ class LiveCameraSource(FrameSource):
             if not ok or img is None:
                 time.sleep(0.01)
                 continue
-            gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+            gray = img.max(axis=2) if (self.luma == "max" and img.ndim == 3) \
+                else cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
             if gray.shape[1] != self.size[0]:
                 gray = cv2.resize(gray, self.size, interpolation=cv2.INTER_AREA)
             with self._lock:
                 self._n += 1
                 self._latest = (gray, t, self._n)
 
-    def lock_exposure(self) -> None:
-        """Freeze auto-exposure at its current setting. A close blinking LED otherwise makes the
-        camera brighten and darken the whole scene in time with it — every light then looks like
-        it blinks, and the beacon's own blink is squashed."""
+    def lock_exposure(self) -> bool:
+        """Freeze auto-exposure at its current setting, and check it actually worked.
+
+        A close blinking LED otherwise makes the camera brighten and darken the whole scene in
+        time with it — every light then looks like it blinks, and the beacon's own blink is
+        squashed. But webcams report exposure in wildly different units, and writing back the
+        value just read can black the image out; so the picture is compared before and after and
+        the camera is put back on auto if the lock spoiled it."""
+        before = self._brightness()
         try:
             exp = self.cap.get(cv2.CAP_PROP_EXPOSURE)
             self.cap.set(cv2.CAP_PROP_AUTO_EXPOSURE, 0.25)          # DirectShow: manual
             self.cap.set(cv2.CAP_PROP_EXPOSURE, exp)
             self.cap.set(cv2.CAP_PROP_AUTO_WB, 0)
         except cv2.error:
-            pass
+            return False
+        after = self._brightness()
+        if before is None or after is None or after < 0.45 * before or after > 2.2 * before:
+            self.unlock_exposure()
+            return False
+        self.exposure_locked = True
+        return True
+
+    def _brightness(self, frames: int = 6) -> Optional[float]:
+        """Mean level of the next few frames (the camera needs a moment to apply a change)."""
+        vals = []
+        t0 = time.perf_counter()
+        seen = -1
+        while len(vals) < frames and time.perf_counter() - t0 < 1.0:
+            with self._lock:
+                latest = self._latest
+            if latest is not None and latest[2] != seen:
+                seen = latest[2]
+                vals.append(float(latest[0].mean()))
+            else:
+                time.sleep(0.005)
+        return float(np.mean(vals[len(vals) // 2:])) if vals else None
 
     def unlock_exposure(self) -> None:
+        self.exposure_locked = False
         try:
             self.cap.set(cv2.CAP_PROP_AUTO_EXPOSURE, 0.75)
         except cv2.error:

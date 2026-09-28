@@ -481,9 +481,11 @@ class Engine:
         # A beacon brought close grows into a large saturated blob: its brightness climbs fast,
         # its centre is coarser, and it outgrows the photometry window.
         cfg.use_roi = False
+        cfg.seed_probe = True            # a clicked light is tracked even below the auto gates
         cfg.size_noise = self.HW_SIZE_NOISE
         cfg.flux_tolerance, cfg.flux_tolerance_coast = 3.0, 2.5
         self.pipeline.detector.CONSOLIDATE = True
+        self.pipeline.detector.BRIGHT_PATH = True    # an LED beacon is simply the brightest thing
         self.pipeline.identifier.APERTURE_MAX = 150
         self.pipeline.identifier.MERGE_DUPLICATES = True
         self.pipeline.identifier.KEYED_WEIGHT = self.HW_KEYED_WEIGHT

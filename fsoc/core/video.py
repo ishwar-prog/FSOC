@@ -107,6 +107,75 @@ class VideoBeaconDetector(BeaconDetector):
     # distinct light (an LED in front of a lit wall), not the same object at a coarser scale.
     # Off by default: the recorded-video results were validated without it.
     KEEP_EMBEDDED = False
+    # Emissive-source path. The point-source stages ask a light to be brighter than a ring 8 px
+    # outside it; a bright LED near the camera sits inside its own halo, which is also bright, so
+    # the beacon itself is rejected while its legs and the board around it are not. This path
+    # takes the opposite view: find what is simply far brighter than the scene, whatever its size
+    # or shape, and let the blink identifier decide which one is the beacon.
+    # Off by default: the recorded-video results were validated without it.
+    BRIGHT_PATH = False
+    BRIGHT_MIN_DN = 45.0            # how far above the scene background a light must sit
+    BRIGHT_MAX_FRAC = 0.04          # ...and at most this fraction of the frame (else it is the scene)
+
+    def _bright_regions(self, gray: np.ndarray, noise: float = 0.0) -> List[Candidate]:
+        """Islands of near-peak brightness, found at several thresholds.
+
+        A single threshold cannot work: set it low and a bright LED merges with its own halo and
+        the sunlit wall behind it into one huge region; set it high and a dim beacon disappears.
+        So the image is cut at a few levels from the brightest down, and a light is taken at the
+        highest level where it is still a compact island of its own.
+        """
+        h, w = gray.shape[:2]
+        sub = gray[::4, ::4]
+        bg = float(np.median(sub))
+        sigma = max(float(np.median(np.abs(sub - bg))) * 1.4826, 1.0)
+        peak_img = float(gray.max())
+        # In a textured scene the MAD measures texture, not noise, so 6 sigma can land above
+        # white and reject everything; the floor is kept below the midpoint to the peak.
+        floor = bg + max(self.BRIGHT_MIN_DN, min(6.0 * sigma, 0.6 * (peak_img - bg)))
+        if peak_img - bg < self.BRIGHT_MIN_DN:
+            return []
+        blur = cv2.GaussianBlur(gray, (0, 0), 1.0)
+        max_area = self.BRIGHT_MAX_FRAC * w * h
+        out: List[Candidate] = []
+        for frac in (0.97, 0.92, 0.85, 0.75):
+            thr = max(floor, frac * peak_img)
+            n, lab, stats, cent = cv2.connectedComponentsWithStats((blur >= thr).astype(np.uint8), 8)
+            for i in range(1, n):
+                area = int(stats[i, cv2.CC_STAT_AREA])
+                if area < 4 or area > max_area:
+                    continue
+                bx, by = int(stats[i, cv2.CC_STAT_LEFT]), int(stats[i, cv2.CC_STAT_TOP])
+                bw, bh = int(stats[i, cv2.CC_STAT_WIDTH]), int(stats[i, cv2.CC_STAT_HEIGHT])
+                if max(bw, bh) / max(1.0, min(bw, bh)) > 4.0:
+                    continue                       # a streak or an edge, not a lamp
+                cx, cy = float(cent[i][0]), float(cent[i][1])
+                if any(math.hypot(cx - c.x, cy - c.y) < 0.5 * (max(bw, bh) + math.sqrt(c.area)) for c in out):
+                    continue                       # already taken at a brighter level
+                # contrast measured clear of the light's own glow: the ring scales with its size
+                pad = int(max(6, 0.8 * max(bw, bh)))
+                rx0, ry0 = max(0, bx - pad), max(0, by - pad)
+                rx1, ry1 = min(w, bx + bw + pad), min(h, by + bh + pad)
+                reg = gray[ry0:ry1, rx0:rx1]
+                ring = np.concatenate((reg[0], reg[-1], reg[1:-1, 0], reg[1:-1, -1]))
+                ring_v = float(np.percentile(ring, 70)) if ring.size >= 8 else bg
+                # Contrast is judged against this light's own surroundings. The scene-wide MAD
+                # measures texture (a sunlit wall next to shadow), which would put a genuine
+                # beacon at "SNR 3" and get it thrown away by the tracker's gates.
+                ring_sd = max(float(np.median(np.abs(ring - ring_v))) * 1.4826, 1.5) if ring.size >= 8 else sigma
+                core = gray[by:by + bh, bx:bx + bw]
+                pk = float(core.max())
+                if pk - ring_v < max(0.5 * self.BRIGHT_MIN_DN, 3.0 * ring_sd):
+                    continue
+                sel = lab[by:by + bh, bx:bx + bw] == i
+                flux = float((core.astype(np.float32) - ring_v)[sel].clip(min=0).sum())
+                # Confidence is reported against the sensor's noise floor (the matched-filter
+                # MAD from the point-source stage), not against the halo's own gradient — the
+                # tracker's SNR gates are calibrated in those units.
+                out.append(Candidate(cx, cy, (pk - ring_v) / max(noise, 1.0), flux, pk, area, 1.0))
+        out.sort(key=lambda c: c.snr, reverse=True)
+        return out[:self.MAX_MOTION_BLOBS]
+
     # One light, one detection. A close, saturated beacon is found as several fragments (edge
     # pieces at full resolution, the whole blob at 1/4 scale) whose centres differ by pixels and
     # which trade places frame to frame — the track hops between them and its blink history is
@@ -245,6 +314,36 @@ class VideoBeaconDetector(BeaconDetector):
             kept = self._consolidate(gray, kept)
         res.candidates = kept
 
+    def probe(self, gray: np.ndarray, x: float, y: float, radius: float = 40.0) -> Optional[Candidate]:
+        """Measure the brightest spot near (x, y) whatever its shape or contrast.
+
+        Used when the operator points at a light the normal gates threw away — a dim LED, a spot
+        fainter than the SNR floor, something that fails the point-source shape tests. Pointing at
+        it is an instruction, so it is measured rather than judged.
+        """
+        h, w = gray.shape[:2]
+        r = int(max(8, min(120, radius)))
+        x0, y0 = max(0, int(x) - r), max(0, int(y) - r)
+        x1, y1 = min(w, int(x) + r + 1), min(h, int(y) + r + 1)
+        if x1 - x0 < 5 or y1 - y0 < 5:
+            return None
+        patch = gray[y0:y1, x0:x1].astype(np.float32)
+        blur = cv2.GaussianBlur(patch, (0, 0), 1.0)
+        py, px = np.unravel_index(int(np.argmax(blur)), blur.shape)
+        peak = float(blur[py, px])
+        ring = np.concatenate((patch[0], patch[-1], patch[1:-1, 0], patch[1:-1, -1]))
+        bg = float(np.median(ring))
+        sigma = max(1.0, float(np.median(np.abs(ring - bg))) * 1.4826)
+        snr = (peak - bg) / sigma
+        if peak - bg < 3.0:
+            return None
+        got = self._region(gray, Candidate(x0 + px, y0 + py, snr, 0.0, peak, 30.0, 1.0))
+        if got is not None:
+            c = got[0]
+            return Candidate(c.x, c.y, max(snr, 1.0), c.flux, c.peak, c.area, c.elongation)
+        flux = float(np.maximum(patch - bg, 0.0).sum())
+        return Candidate(x0 + px, y0 + py, max(snr, 1.0), flux, peak, 9.0, 1.0)
+
     def _consolidate(self, gray: np.ndarray, cands: List[Candidate]) -> List[Candidate]:
         out: List[Candidate] = []
         regions = []                                  # (x0, y0, mask) of each light already kept
@@ -301,6 +400,9 @@ class VideoBeaconDetector(BeaconDetector):
         flux = float((mask * (patch - bg)).sum())
         return Candidate(cx, cy, c.snr, flux, pk, area, c.elongation), (x0, y0, mask)
 
+    def _same_light(self, c: Candidate, k: Candidate, r_new: float) -> bool:
+        return math.hypot(c.x - k.x, c.y - k.y) <= max(self.MERGE_PX, r_new + 0.6 * math.sqrt(max(k.area, 1)))
+
     def _distinct(self, c: Candidate, k: Candidate, r_new: float) -> bool:
         d = math.hypot(c.x - k.x, c.y - k.y)
         rk = math.sqrt(max(k.area, 1))
@@ -315,6 +417,17 @@ class VideoBeaconDetector(BeaconDetector):
         res = super().detect(gray, None)      # full frame: a pyramid needs the whole view anyway
         t0 = cv2.getTickCount()
         self._multiscale(gray, res)
+        if self.BRIGHT_PATH:
+            merged = list(res.candidates)
+            for c in self._bright_regions(gray, res.noise_sigma):
+                r_new = 0.6 * math.sqrt(max(c.area, 1))
+                keep = [k for k in merged if not self._same_light(c, k, r_new)]
+                if len(keep) != len(merged):          # this light was already found: prefer this
+                    merged = keep                     # measurement, which spans its whole glow
+                merged.append(c)
+            merged.sort(key=lambda c: c.snr, reverse=True)
+            del merged[self.max_candidates:]
+            res.candidates = merged
         res.proc_ms += (cv2.getTickCount() - t0) / cv2.getTickFrequency() * 1000.0
         if not self.motion_enabled:
             return res

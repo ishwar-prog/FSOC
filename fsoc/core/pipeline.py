@@ -97,6 +97,8 @@ class PipelineConfig:
     # Extra centroid noise per pixel of blob size: a large, saturated light's centre is less
     # certain than a point's. 0 keeps the point-source model.
     size_noise: float = 0.0
+    # Measure the spot the operator clicked even when no detection passed the gates there.
+    seed_probe: bool = False
 
 
 @dataclass
@@ -209,6 +211,8 @@ class TrackingPipeline:
             self._seed = None
             self._seed_t = None
             self._lock_seeded = False
+            self._img = None
+            self._frame_pose = (0.0, 0.0)
             self.identifier.reset(keep_signature=True)
 
     def reset_identity(self) -> None:
@@ -244,6 +248,21 @@ class TrackingPipeline:
             self._mode = TrackState.SEARCH
             self._set_state(TrackState.SEARCH, self._last_frame_t or 0.0)
 
+    def _probe_seed(self, t: float, los) -> Optional[tuple]:
+        """Measure the light under the operator's click directly. Pointing at something is an
+        instruction, not a suggestion: it is tracked even if the automatic gates (SNR floor,
+        point-source shape) would have discarded it."""
+        probe = getattr(self.detector, "probe", None)
+        if probe is None or self._img is None or self._seed is None:
+            return None
+        c = probe(self._img, self._seed[0], self._seed[1], self.SEED_RADIUS_PX)
+        if c is None:
+            return None
+        gaz, gel = self._frame_pose
+        az, el = pixel_to_los(c.x, c.y, gaz, gel, self.K)
+        sig_px = 0.25 + 2.0 / math.sqrt(max(c.snr, 1.0)) + self.cfg.size_noise * math.sqrt(max(c.area, 1.0))
+        return (c, az, el, (sig_px / self.K.fx) ** 2)
+
     def _seed_px_dist(self, c: Candidate) -> Optional[float]:
         if self._seed is None:
             return None
@@ -273,6 +292,8 @@ class TrackingPipeline:
                 sig_px = 0.25 + 2.0 / math.sqrt(max(c.snr, 1.0)) + self.cfg.size_noise * math.sqrt(max(c.area, 1.0))
                 los.append((c, az, el, (sig_px / K.fx) ** 2))
             gimg = frame.image if frame.image.ndim == 2 else frame.image[..., 1]
+            self._img = gimg
+            self._frame_pose = (frame.gimbal_az, frame.gimbal_el)
             self._assign = self.identifier.update(t, gimg, frame.gimbal_az, frame.gimbal_el, los)
             mg = self.identifier.merged
             if mg:                                   # duplicates of one light were folded together
@@ -660,6 +681,12 @@ class TrackingPipeline:
                         if best_snr is None or c.snr > best_snr:
                             best_snr, best_i = c.snr, i
                     seed_pick = best_i
+                    if seed_pick is None and self.cfg.seed_probe:
+                        probed = self._probe_seed(t, los)
+                        if probed is not None:
+                            los.append(probed)
+                            self._assign.append(None)
+                            seed_pick = len(los) - 1
                     if seed_pick is None:
                         self._set_state(TrackState.SEARCH, t)
                         return None              # nothing convincing there yet — keep waiting
@@ -671,7 +698,8 @@ class TrackingPipeline:
             c, az, el, r = los[i]
             if len(self._hyps) >= max_h and cfg.prefer_keyed and allow_spawn and i not in used:
                 self._make_room_for_blinker(i, t, reacq)
-            if (not allow_spawn or i in used or c.snr < cfg.min_snr_new
+            picked = seeded_now and i == seed_pick        # the operator pointed at this one
+            if (not allow_spawn or i in used or (c.snr < cfg.min_snr_new and not picked)
                     or len(self._hyps) >= max_h):
                 continue
             if self._is_known_clutter(i) and not seeded_now:

@@ -75,3 +75,7 @@ $RECYCLE.BIN/
 .DS_Store
 .Spotlight-V100
 .Trashes
+
+hw_check_blink.png
+hw_check_detections.png
+hw_check_frame.png

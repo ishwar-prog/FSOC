@@ -96,6 +96,7 @@ class HardwareRig:
         self._scan = None
         self._scan_i = 0
         self._scan_t = None
+        self._acq_t = None
 
     # ------------------------------------------------------------ connect
     def start(self) -> None:
@@ -253,6 +254,7 @@ class HardwareRig:
 
     # ------------------------------------------------------------ step-stare search
     STARE_S = 1.4               # still time per pose: several blinks of a >= 2 Hz beacon
+    ACQUIRE_STARE_S = 3.5       # longest the head holds still for a candidate that never locks
     SCAN_OVERLAP = 0.85         # pose spacing as a fraction of the field of view
 
     def scan_target(self, t: float, acquiring: bool) -> Tuple[float, float]:
@@ -268,8 +270,16 @@ class HardwareRig:
             self._scan_i, self._scan_t = 0, None
         target = self._scan[self._scan_i]
         if acquiring:
-            self._scan_t = None if self._scan_t is None else t    # restart the stare clock
-            return target
+            # Hold still while a candidate proves itself — but not forever: if the beacon has
+            # left the field (hidden, or the head drifted off after a loss), staring at an empty
+            # patch of wall would end the search permanently.
+            if self._acq_t is None:
+                self._acq_t = t
+            if t - self._acq_t < self.ACQUIRE_STARE_S:
+                self._scan_t = None
+                return target
+        else:
+            self._acq_t = None
         if math.hypot(target[0] - az, target[1] - el) < 0.5 and self.servo.settled():
             if self._scan_t is None:
                 self._scan_t = t
@@ -281,6 +291,7 @@ class HardwareRig:
     def restart_scan(self) -> None:
         """Next search starts where the head is now (the last place the beacon was seen)."""
         self._scan = None
+        self._acq_t = None
 
     def _scan_poses(self, az0: float, el0: float):
         (a0, a1), (e0, e1) = self.geometry.limits()
