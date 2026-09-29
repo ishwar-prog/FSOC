@@ -1,5 +1,5 @@
 # -*- mode: python ; coding: utf-8 -*-
-# Single-file Windows build:  pyinstaller --noconfirm FSOC_Beacon_Tracker.spec
+# Single-file Windows build:  pyinstaller --noconfirm COSTA.spec
 
 import os
 
@@ -39,7 +39,7 @@ exe = EXE(
     a.binaries,
     a.datas,
     [],
-    name="FSOC_Beacon_Tracker",
+    name="COSTA",
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,
