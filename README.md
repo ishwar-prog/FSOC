@@ -373,7 +373,6 @@ by the evaluator.
 | `ui/` | PySide6 interface: Live tracking and Analytics, light and dark themes |
 | `firmware/fsoc_pantilt/` | Arduino pan/tilt sketch |
 | `tools/` | Demo-clip generator, hardware check |
-| `video/` | Remotion sources for the intro, launch and pitch videos |
 
 ## Built with
 
@@ -384,7 +383,6 @@ by the evaluator.
   <img alt="PySide6" src="https://img.shields.io/badge/PySide6-ffffff?style=for-the-badge&logo=qt&logoColor=0a5c96">
   <img alt="pyqtgraph" src="https://img.shields.io/badge/pyqtgraph-ffffff?style=for-the-badge&logoColor=0a5c96">
   <img alt="Arduino" src="https://img.shields.io/badge/Arduino-ffffff?style=for-the-badge&logo=arduino&logoColor=0a5c96">
-  <img alt="Remotion" src="https://img.shields.io/badge/Remotion-ffffff?style=for-the-badge&logo=remotion&logoColor=0a5c96">
 </p>
 
 Typeface: Inter (SIL Open Font License). Acquisition procedure after NASA's OPALS demonstration.
