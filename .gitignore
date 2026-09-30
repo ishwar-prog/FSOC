@@ -76,6 +76,11 @@ $RECYCLE.BIN/
 .Spotlight-V100
 .Trashes
 
-hw_check_blink.png
-hw_check_detections.png
-hw_check_frame.png
+# tools/hw_check.py output images
+hw_check_*.png
+*_crash.log
+
+# ==============================================================================
+# Submission-video workspace (Remotion project, source clips, renders) — local only
+# ==============================================================================
+video/
